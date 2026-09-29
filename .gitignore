@@ -6,8 +6,8 @@
 # Binaries for programs and plugins
 /bin/
 /dist/
-client
-tracker
+/client
+/tracker
 
 *.exe
 *.exe~
