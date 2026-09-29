@@ -1,7 +1,14 @@
+# ---- Github Standard go template -----
+
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
 # Binaries for programs and plugins
+/bin/
+/dist/
+client
+tracker
+
 *.exe
 *.exe~
 *.dll
@@ -27,6 +34,10 @@ go.work.sum
 # env file
 .env
 
+# macOS
+.DS_Store
+._*
+
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
