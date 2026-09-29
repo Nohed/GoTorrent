@@ -11,7 +11,7 @@ Bittorrent client written in GO.
 
 **Goal:** parse .torrent filesi nto go structs
 
-## Phase 2: Mange pieces and storage
+## Phase 2: Manage pieces and storage
 **Build:** internal/storage/piece.go & internal/storage/validator.go
 
 **goal:** Manage writing chunks to disk and cryptographic validation.
