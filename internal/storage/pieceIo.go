@@ -40,6 +40,8 @@ func (pieceIO *PieceIO) PieceSize(pieceIndex int) int {
 	return pieceEnd - pieceStart
 }
 
+// WritePiece verifies the piece and only then writes it at its offset in the file.
+// Unverified data never reaches the disk.
 func (pieceIO *PieceIO) WritePiece(piece *Piece) error {
 	if piece.Index < 0 || piece.Index*pieceIO.pieceLength >= pieceIO.totalLength {
 		return fmt.Errorf("piece index %d out of range", piece.Index)
@@ -50,17 +52,18 @@ func (pieceIO *PieceIO) WritePiece(piece *Piece) error {
 		return fmt.Errorf("piece %d has length %d, want %d", piece.Index, piece.Length, expectedSize)
 	}
 
-	if err := piece.Verify(); err != nil {
+	if err := VerifyPiece(piece); err != nil {
 		return err
 	}
 
 	fileOffset := int64(piece.Index) * int64(pieceIO.pieceLength)
-	if _, err := pieceIO.file.WriteAt(piece.data, fileOffset); err != nil {
+	if _, err := pieceIO.file.WriteAt(piece.Bytes(), fileOffset); err != nil {
 		return fmt.Errorf("failed to write piece %d: %w", piece.Index, err)
 	}
 	return nil
 }
 
+// Close closes the underlying file.
 func (pieceIO *PieceIO) Close() error {
 	return pieceIO.file.Close()
 }

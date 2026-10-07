@@ -2,8 +2,9 @@ package storage
 
 import "fmt"
 
-// BlockSize is the size of the chunks requested from peers the peers.
-const BlockSize = 16384 // 16 KiB
+// BlockSize is the size of the chunks requested from peers (16 KiB).
+// Pieces are downloaded as blocks and only verified once every block has arrived.
+const BlockSize = 16384
 
 // Piece collects the blocks of a single piece in memory until it is complete.
 type Piece struct {
@@ -16,6 +17,7 @@ type Piece struct {
 	receivedCount int    // Number of distinct blocks received so far
 }
 
+// NewPiece creates an empty piece ready to receive blocks.
 func NewPiece(index, length int, hash [20]byte) *Piece {
 	blockCount := (length + BlockSize - 1) / BlockSize
 	return &Piece{
@@ -28,7 +30,17 @@ func NewPiece(index, length int, hash [20]byte) *Piece {
 }
 
 // blockLength returns the expected length of the block at blockIndex.
+// Every block is BlockSize except possibly the last one.
+func (piece *Piece) blockLength(blockIndex int) int {
+	isLastBlock := blockIndex == len(piece.blockReceived)-1
+	if isLastBlock {
+		return piece.Length - blockIndex*BlockSize
+	}
+	return BlockSize
+}
 
+// AddBlock stores a block received from a peer. blockOffset is the byte offset within the piece.
+// Duplicate blocks are ignored.
 func (piece *Piece) AddBlock(blockOffset int, blockData []byte) error {
 	if blockOffset < 0 || blockOffset >= piece.Length {
 		return fmt.Errorf("block offset %d out of range for piece of length %d", blockOffset, piece.Length)
@@ -52,6 +64,12 @@ func (piece *Piece) AddBlock(blockOffset int, blockData []byte) error {
 	return nil
 }
 
+// Complete reports whether every block has been received.
+func (piece *Piece) Complete() bool {
+	return piece.receivedCount == len(piece.blockReceived)
+}
+
+// MissingBlocks returns the offsets and lengths of blocks still needed, for building requests.
 func (piece *Piece) MissingBlocks() (missingOffsets, missingLengths []int) {
 	for blockIndex, received := range piece.blockReceived {
 		if !received {
@@ -61,21 +79,7 @@ func (piece *Piece) MissingBlocks() (missingOffsets, missingLengths []int) {
 	}
 	return missingOffsets, missingLengths
 }
-func (piece *Piece) Verify() error {
-	if !piece.Complete() {
-		return fmt.Errorf("piece %d is incomplete: %d/%d blocks", piece.Index, piece.receivedCount, len(piece.blockReceived))
-	}
-	return Verify(piece.data, piece.Hash)
-}
 
-func (piece *Piece) blockLength(blockIndex int) int {
-	isLastBlock := blockIndex == len(piece.blockReceived)-1
-	if isLastBlock {
-		return piece.Length - blockIndex*BlockSize
-	}
-	return BlockSize
-}
-
-func (piece *Piece) Complete() bool {
-	return piece.receivedCount == len(piece.blockReceived)
+func (piece *Piece) Bytes() []byte {
+	return piece.data
 }
