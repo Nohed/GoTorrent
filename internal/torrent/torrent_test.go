@@ -11,6 +11,14 @@ import (
 
 const testAnnounce = "http://tracker.test/announce"
 
+const testTorrentFile = "../../testdata/ubuntu-26.04.1-desktop-amd64.iso.torrent"
+const testTorrentName = "ubuntu-26.04.1-desktop-amd64.iso"
+const testTorrentAnnounce = "https://torrent.ubuntu.com/announce"
+const testTorrentInfoHash = "5b1e0d988fc7a0c9e99bd852071681a59974b39f"
+const testTorrentPieceLength = 262144
+const testTorrentTotalLength = 6482409472
+const testTorrentNumPieces = 24729
+
 // Creates a fake piece using sha1 (20 bytes)
 func fakePieces(n int) string {
 	var sb strings.Builder
@@ -20,18 +28,19 @@ func fakePieces(n int) string {
 	}
 	return sb.String()
 }
-// buildInfo builds a bencoded info dictionary 
+
+// buildInfo builds a bencoded info dictionary
 func buildInfo(length, pieceLength int, pieces string) string {
 	return fmt.Sprintf("d6:lengthi%de4:name8:test.iso12:piece lengthi%de6:pieces%d:%se",
 		length, pieceLength, len(pieces), pieces)
 }
 
-// Helper to build torrent byte 
+// Helper to build torrent byte
 func buildTorrent(info string) []byte {
 	return []byte(fmt.Sprintf("d8:announce%d:%s4:info%se", len(testAnnounce), testAnnounce, info))
 }
 
-//Test parse uneven length fit of pieces in total lenght
+// Test parse uneven length fit of pieces in total lenght
 func TestParse_Valid(t *testing.T) {
 	pieces := fakePieces(3)
 	info := buildInfo(100, 40, pieces)
@@ -187,4 +196,32 @@ func TestSplitPieceHashes(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestParseFile_RealTorrent(t *testing.T) {
+	torrentPath := testTorrentFile
+	torrent, err := ParseFile(torrentPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if torrent.Announce != testTorrentAnnounce {
+		t.Errorf("Announce = %q, want %q", torrent.Announce, testTorrentAnnounce)
+	}
+	if torrent.Name != testTorrentName {
+		t.Errorf("Name = %q, want %q", torrent.Name, testTorrentName)
+	}
+	if hash := fmt.Sprintf("%x", torrent.InfoHash); hash != testTorrentInfoHash {
+		t.Errorf("InfoHash = %s, want %s", hash, testTorrentInfoHash)
+	}
+	if torrent.PieceLength != testTorrentPieceLength {
+		t.Errorf("PieceLength = %d, want %d", torrent.PieceLength, testTorrentPieceLength)
+	}
+	if torrent.Length != testTorrentTotalLength {
+		t.Errorf("Length = %d, want %d", torrent.Length, testTorrentTotalLength)
+	}
+	if len(torrent.PieceHashes) != testTorrentNumPieces {
+		t.Errorf("len(PieceHashes) = %d, want %d", len(torrent.PieceHashes), testTorrentNumPieces)
+	}
+
 }
