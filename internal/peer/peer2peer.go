@@ -2,16 +2,10 @@ package peer
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
-// Length of Protocol identifier = 0x13 (19 base10 bytes)
-// Protocol identifier = "BitTorrent protocol"
-// Eight reserved bytes set to 0x00
-// Info hash of file we want
-// Our peer ID
-
-const protocolID = "BitTorrent protocol"
 const maxMessageLen = 1 << 20 // max message length is 1 MiB 2^20 bit
 const (
 	MsgChoke         messageID = 0
@@ -37,32 +31,6 @@ type Message struct {
 	Payload []byte
 }
 
-type Handshake struct {
-	Pstr     string   // Always "BitTorrent protocol"
-	InfoHash [20]byte // SHA1 hash of the info key in the torrent file
-	PeerID   [20]byte // Unique identifier for the peer
-}
-
-func NewHandshake(infoHash, peerID [20]byte) *Handshake {
-	return &Handshake{Pstr: protocolID, InfoHash: infoHash, PeerID: peerID}
-}
-
-/*
-1byte    19 bytes    8 bytes       20 bytes   20 byte
-[pstrlen][pstr][8 reserved bytes][info hash][peer id]
-*/
-func (h *Handshake) Serialize() []byte {
-	buf := make([]byte, 49+len(h.Pstr))
-	buf[0] = byte(len(h.Pstr)) // Length of identifier
-	index := 1
-	index += copy(buf[index:], []byte(h.Pstr))  // Protocl identifier
-	index += copy(buf[index:], make([]byte, 8)) // Reserved bytes, should be 0x00, i think this can be ignored and do just index += 8
-	index += copy(buf[index:], h.InfoHash[:])   // Info hash
-	copy(buf[index:], h.PeerID[:])              // Peer ID
-	return buf
-
-}
-
 /*
 4 bytes           1 byte     n bytes
 [length prefix][message ID][payload... .. .]
@@ -83,7 +51,7 @@ func (m *Message) serialize() []byte {
 	return buf
 }
 
-// Create messages
+// ---- Create messages -------
 func NewChoke() *Message             { return &Message{ID: MsgChoke} }
 func NewUnchoke() *Message           { return &Message{ID: MsgUnchoke} }
 func NewInterested() *Message        { return &Message{ID: MsgInterested} }
@@ -119,15 +87,38 @@ func NewPiece(index int, begin int, data []byte) *Message {
 }
 
 func NewCancel(index int, begin, length int) *Message {
-	return NewRequest(index, begin, length) // Cancel has the same payload as Request
+	message := NewRequest(index, begin, length) // Cancel has the same payload as Request
+	message.ID = MsgCancel
+	return message
 }
 
-// Parse messages
+// ---- Read messages & Handshake -------
 
-func ReadMessage(r io.Reader) (*Message, error) {
+/*
+4 bytes           1 byte     n bytes
+[length prefix][message ID][payload... .. .]
+*/
+func ReadMessage(reader io.Reader) (*Message, error) {
 	// Read message id and then create slice size?
 	var lengthBuf [4]byte
-	length := make([]byte, 4)
+	if _, err := io.ReadFull(reader, lengthBuf[:]); err != nil {
+		return nil, err // pass io.EOF through unwrapped so callers can detect a clean close
+	}
+	length := binary.BigEndian.Uint32(lengthBuf[:])
+	if length == 0 {
+		return nil, nil // Keep-alive
+	}
+	if length > maxMessageLen {
+		return nil, fmt.Errorf("message too large: %d bytes", length)
+	}
+
+	// Rest
+	buf := make([]byte, length)
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		return nil, fmt.Errorf("read message body: %w", err)
+	}
+	return &Message{ID: messageID(buf[0]), Payload: buf[1:]}, nil
+
 }
 
-func ReadHandshake(r io.Reader) (*Handshake, error) {}
+// ---- Parse Messages -------
