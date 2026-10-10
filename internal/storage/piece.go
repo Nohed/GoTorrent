@@ -8,24 +8,26 @@ const BlockSize = 16384
 
 // Piece collects the blocks of a single piece in memory until it is complete.
 type Piece struct {
-	Index  int      // Index of the piece in the torrent
-	Length int      // Length of this piece (the last piece may be shorter)
-	Hash   [20]byte // Expected SHA-1 from the torrent file
+	Index  int
+	Length int
+	Hash   [20]byte
 
-	data          []byte // The piece's bytes, filled in block by block
-	blockReceived []bool // One flag per block, true once that block has arrived
-	receivedCount int    // Number of distinct blocks received so far
+	data           []byte
+	blockReceived  []bool // true once the block has arrived
+	blockRequested []bool // true while a request for the block is in flight
+	receivedCount  int
 }
 
 // NewPiece creates an empty piece ready to receive blocks.
 func NewPiece(index, length int, hash [20]byte) *Piece {
 	blockCount := (length + BlockSize - 1) / BlockSize
 	return &Piece{
-		Index:         index,
-		Length:        length,
-		Hash:          hash,
-		data:          make([]byte, length),
-		blockReceived: make([]bool, blockCount),
+		Index:          index,
+		Length:         length,
+		Hash:           hash,
+		data:           make([]byte, length),
+		blockReceived:  make([]bool, blockCount),
+		blockRequested: make([]bool, blockCount),
 	}
 }
 
@@ -62,6 +64,32 @@ func (piece *Piece) AddBlock(blockOffset int, blockData []byte) error {
 	piece.blockReceived[blockIndex] = true
 	piece.receivedCount++
 	return nil
+}
+
+// ReleaseBlock clears the request flag (peer choked, timed out, or disconnected)
+// so the block can be handed out again.
+func (piece *Piece) ReleaseBlock(offset int) {
+	i := offset / BlockSize
+	if i >= 0 && i < len(piece.blockRequested) && !piece.blockReceived[i] {
+		piece.blockRequested[i] = false
+	}
+}
+
+// Reset discards all data after a failed hash check.
+func (piece *Piece) Reset() {
+	clear(piece.blockReceived)
+	clear(piece.blockRequested)
+	piece.receivedCount = 0
+}
+
+func (piece *Piece) NextUnrequested() (offset, length int, ok bool) {
+	for i := range piece.blockReceived {
+		if !piece.blockReceived[i] && !piece.blockRequested[i] {
+			piece.blockRequested[i] = true // claimed
+			return i * BlockSize, piece.blockLength(i), true
+		}
+	}
+	return 0, 0, false
 }
 
 // Complete reports whether every block has been received.
