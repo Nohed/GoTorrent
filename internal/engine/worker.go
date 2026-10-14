@@ -1,17 +1,32 @@
 package engine
 
 import (
-	"encoding/binary"
-	"fmt"
+	"log"
+	"net"
 	"time"
 
+	"github.com/Nohed/GoTorrent/internal/manager"
 	"github.com/Nohed/GoTorrent/internal/peer"
 )
 
-func run(p *peer.Peer) {
+// TODO: should add tracking ( bad data, not sending and so on)
+type Worker struct {
+	Peer *peer.Peer
+	Mgr  *manager.Manager
+}
+
+func NewWorker(conn net.Conn, mgr *manager.Manager) *Worker {
+	return &Worker{
+		Peer: peer.NewPeer(conn, mgr.NumPieces()),
+		Mgr:  mgr,
+	}
+}
+
+func (w *Worker) Run() error {
 
 }
-func readLoop(p *peer.Peer) error {
+func (w *Worker) readLoop() error {
+	p := w.Peer
 	for {
 		// A dead peer sends nothing, not even keep-alives
 		p.Conn.SetReadDeadline(time.Now().Add(3 * time.Minute))
@@ -23,26 +38,29 @@ func readLoop(p *peer.Peer) error {
 		if msg == nil {
 			continue // keep-alive
 		}
-		if err := handle(p, msg); err != nil {
+		if err := w.handle(msg); err != nil {
 			return err // protocol violation: drop the peer
 		}
 	}
 }
 
-func writeLoop(p *peer.Peer) {
+func (w *Worker) writeLoop() {
+
 }
 
-func releaseAll(p *peer.Peer) {
+func (w *Worker) releaseAll() {
+	p := w.Peer
 	for k := range p.Inflight {
-		p.Mgr.Release(k.Index, k.Begin)
+		w.Mgr.Release(k.Index, k.Begin)
 	}
 	clear(p.Inflight)
 }
 
-// Fills the pipeline to peer with relevant data so we can continue sending asap
-func fillPipeline(p *peer.Peer) {
+// fillPipeline keeps up to MaxPipeline block requests outstanding.
+func (w *Worker) fillPipeline() {
+	p := w.Peer
 	for !p.PeerChoking && len(p.Inflight) < peer.MaxPipeline {
-		idx, begin, length, ok := p.Mgr.NextRequest(p.Has)
+		idx, begin, length, ok := w.Mgr.NextRequest(p.Has)
 		if !ok {
 			return
 		}
@@ -51,13 +69,60 @@ func fillPipeline(p *peer.Peer) {
 	}
 }
 
-func handle(p *peer.Peer, m *peer.Message) error {
+func (w *Worker) updateInterest() {
+	p := w.Peer
+	want := w.Mgr.Needs(p.Has)
+
+	if want && !p.AmInterested {
+		p.AmInterested = true
+		p.Out <- peer.NewInterested()
+	} else if !want && p.AmInterested {
+		p.AmInterested = false
+		p.Out <- peer.NewNotInterested()
+	}
+}
+func (w *Worker) handleBlock(index, begin int, data []byte) {
+	p := w.Peer
+	key := peer.BlockKey{Index: index, Begin: begin}
+	if _, asked := p.Inflight[key]; !asked {
+		return // we never requested this block, ignore it
+	}
+	delete(p.Inflight, key)
+
+	if _, err := w.Mgr.AddBlock(index, begin, data); err != nil {
+		log.Printf("piece %d: %v", index, err)
+	}
+	w.fillPipeline() // a slot freed up, request another block
+}
+
+func (w *Worker) handleRequest(index, begin, length int) {
+	p := w.Peer
+	if p.AmChoking.Load() || !p.PeerInterested || !w.Mgr.Have(index) {
+		return
+	}
+	go func() {
+		data, err := w.Mgr.ReadBlock(index, begin, length)
+		if err != nil {
+			return // bad range from a hostile peer
+		}
+		select {
+		case p.Out <- peer.NewPiece(index, begin, data):
+		case <-p.Done:
+		default: // queue full, drop it
+		}
+	}()
+}
+
+func (w *Worker) handle(m *peer.Message) error {
+	p := w.Peer
 	switch m.ID {
 	case peer.MsgChoke:
 		p.PeerChoking = true
-		releaseAll(p) //We are choked, drop our work so others can do it
+		w.releaseAll() // our requests are dead, give blocks back
+
 	case peer.MsgUnchoke:
 		p.PeerChoking = false
+		w.fillPipeline()
 
 	case peer.MsgInterested:
 		p.PeerInterested = true
@@ -66,20 +131,37 @@ func handle(p *peer.Peer, m *peer.Message) error {
 		p.PeerInterested = false
 
 	case peer.MsgHave:
-		if len(m.Payload) < 4 {
-			return fmt.Errorf("Too short for a have message")
+		index, err := m.ParseHave()
+		if err != nil {
+			return err
 		}
-		pieceIndex := int(binary.BigEndian.Uint32(m.Payload[0:4])) //göra detta till funktioner istället, kommer behövas en del
-		p.SetPiece(pieceIndex)
+		if err := p.SetPiece(index); err != nil {
+			return err
+		}
+		w.updateInterest()
+		w.fillPipeline()
 
 	case peer.MsgBitfield:
+		if err := p.SetBitfield(m.Payload); err != nil {
+			return err
+		}
+		w.updateInterest()
 
 	case peer.MsgRequest:
+		index, begin, length, err := m.ParseRequest()
+		if err != nil {
+			return err
+		}
+		w.handleRequest(index, begin, length)
 
 	case peer.MsgPiece:
+		index, begin, data, err := m.ParsePiece()
+		if err != nil {
+			return err
+		}
+		w.handleBlock(index, begin, data)
 
 	case peer.MsgCancel:
-		// optional: drop a queued upload for this block
 	}
 	return nil // unknown IDs are ignored
 }

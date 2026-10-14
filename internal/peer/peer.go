@@ -1,10 +1,9 @@
 package peer
 
 import (
+	"fmt"
 	"net"
 	"sync/atomic"
-
-	"github.com/Nohed/GoTorrent/internal/manager"
 )
 
 type BlockKey struct {
@@ -20,8 +19,7 @@ const (
 
 type Peer struct {
 	Conn net.Conn
-	Mgr  *manager.Manager // shared
-	Out  chan *Message    // private outbound queue
+	Out  chan *Message // private outbound queue
 
 	NumPieces int
 
@@ -35,20 +33,19 @@ type Peer struct {
 	// Touched by the mutliple things, need automic i think
 	AmChoking atomic.Bool
 
-	done chan struct{} // closed when the peer shuts down
+	Done chan struct{} // closed when the peer shuts down
 }
 
-func NewPeer(conn net.Conn, manager *manager.Manager) *Peer {
-	count := manager.NumPieces()
+// Count is number of pieces that we can fetch
+func NewPeer(conn net.Conn, count int) *Peer {
 	p := &Peer{
 		Conn:        conn,
-		Mgr:         manager,
 		Out:         make(chan *Message, OutQueueLen),
 		NumPieces:   count,
 		PeerChoking: true,
 		Bitfield:    make([]byte, (count+7)/8),
 		Inflight:    make(map[BlockKey]struct{}),
-		done:        make(chan struct{}),
+		Done:        make(chan struct{}),
 	}
 	p.AmChoking.Store(true)
 	return p
@@ -66,29 +63,40 @@ func (p *Peer) Has(index int) bool {
 }
 
 // SetPiece marks a specific piece as available in the peer's bitfield.
-func (p *Peer) SetPiece(index int) {
-	if index < 0 || index >= p.NumPieces {
-		return
+func (p *Peer) SetPiece(index int) error {
+	if !p.setBit(index, true) {
+		return fmt.Errorf("have index %d out of range", index)
 	}
-	byteIndex := index / 8
-	bitIndex := uint(7 - (index % 8))
-
-	p.Bitfield[byteIndex] |= (1 << bitIndex)
+	return nil
 }
 
-// ClearPiece marks a specific piece as missing (if needed).
 func (p *Peer) ClearPiece(index int) {
-	if index < 0 || index >= p.NumPieces {
-		return
-	}
-	byteIndex := index / 8
-	bitIndex := uint(7 - (index % 8))
-
-	p.Bitfield[byteIndex] &^= (1 << bitIndex)
+	p.setBit(index, false)
 }
 
 // SetBitfield copies an entire raw bitfield message payload into the peer's bitfield.
-func (p *Peer) SetBitfield(data []byte) {
-	// Copy as much as fits to prevent out-of-bounds panics if payloads vary slightly
+func (p *Peer) SetBitfield(data []byte) error {
+	if len(data) != len(p.Bitfield) {
+		return fmt.Errorf("bitfield length %d, want %d", len(data), len(p.Bitfield))
+	}
 	copy(p.Bitfield, data)
+	return nil
+}
+
+//helper
+
+// It reports false if index is out of range.
+func (p *Peer) setBit(index int, on bool) bool {
+	if index < 0 || index >= p.NumPieces {
+		return false
+	}
+	byteIndex := index / 8
+	mask := byte(0x80) >> (index % 8)
+
+	if on {
+		p.Bitfield[byteIndex] |= mask // force the bit to 1
+	} else {
+		p.Bitfield[byteIndex] &^= mask // force the bit to 0
+	}
+	return true
 }

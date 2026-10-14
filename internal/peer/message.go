@@ -92,6 +92,35 @@ func NewCancel(index int, begin, length int) *Message {
 	return message
 }
 
+// ParseHave returns the piece index from a have message.
+func (m *Message) ParseHave() (int, error) {
+	if m.ID != MsgHave || len(m.Payload) != 4 {
+		return 0, fmt.Errorf("bad have message: payload length %d", len(m.Payload))
+	}
+	return int(binary.BigEndian.Uint32(m.Payload)), nil
+}
+
+// ParseRequest works for both request and cancel, which share a payload layout.
+func (m *Message) ParseRequest() (index, begin, length int, err error) {
+	if (m.ID != MsgRequest && m.ID != MsgCancel) || len(m.Payload) != 12 {
+		return 0, 0, 0, fmt.Errorf("bad request/cancel message: payload length %d", len(m.Payload))
+	}
+	index = int(binary.BigEndian.Uint32(m.Payload[0:4]))
+	begin = int(binary.BigEndian.Uint32(m.Payload[4:8]))
+	length = int(binary.BigEndian.Uint32(m.Payload[8:12]))
+	return index, begin, length, nil
+}
+
+// ParsePiece returns the block's location and data. The data slice points into the payload.
+func (m *Message) ParsePiece() (index, begin int, data []byte, err error) {
+	if m.ID != MsgPiece || len(m.Payload) < 8 {
+		return 0, 0, nil, fmt.Errorf("bad piece message: payload length %d", len(m.Payload))
+	}
+	index = int(binary.BigEndian.Uint32(m.Payload[0:4]))
+	begin = int(binary.BigEndian.Uint32(m.Payload[4:8]))
+	return index, begin, m.Payload[8:], nil
+}
+
 // ---- Read messages & Handshake -------
 
 /*
