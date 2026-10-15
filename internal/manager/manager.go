@@ -88,13 +88,15 @@ func (manager *Manager) AddBlock(pieceIndex, blockBegin int, blockData []byte) (
 	}
 
 	delete(manager.inflight, pieceIndex) // we now own the piece exclusively
+	manager.have[pieceIndex] = true      //make sure noone can try to download it when we are writing it to disk
 	manager.mutex.Unlock()
 
 	// Hash + disk I/O outside the lock.
 	if err := manager.io.WritePiece(piece); err != nil {
-		piece.Reset()
 
+		piece.Reset()
 		manager.mutex.Lock()
+		manager.have[pieceIndex] = false     //if fail to write it we dont have it so set flag to false
 		manager.inflight[pieceIndex] = piece // back in the pool to retry
 		manager.mutex.Unlock()
 
@@ -115,9 +117,7 @@ func (manager *Manager) Have(pieceIndex int) bool {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
 
-	return pieceIndex >= 0 &&
-		pieceIndex < len(manager.have) &&
-		manager.have[pieceIndex]
+	return pieceIndex >= 0 && pieceIndex < len(manager.have) && manager.have[pieceIndex]
 }
 
 // Release is called for each block belonging to a dead or choked peer's inflight set.
