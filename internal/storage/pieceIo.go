@@ -5,11 +5,18 @@ import (
 	"os"
 )
 
-// PieceIO writes verified pieces to a single file on disk.
+// PieceIO writes verified pieces to a single file on disk by listening on a channel and writing to an output if something goes wrong.
 type PieceIO struct {
 	file        *os.File
 	totalLength int // Length of the whole file in bytes
 	pieceLength int // Length of each piece (except possibly the last)
+	InChan      chan *Piece
+	OutChan     chan WriteError
+}
+
+type WriteError struct {
+	Index int
+	Err   error
 }
 
 // NewPieceIO creates (or truncates) the output file and preallocates it to the full length.
@@ -28,6 +35,19 @@ func NewPieceIO(path string, totalLength, pieceLength int) (*PieceIO, error) {
 	}
 
 	return &PieceIO{file: file, totalLength: totalLength, pieceLength: pieceLength}, nil
+}
+
+func (pieceIO *PieceIO) run() {
+	for {
+		piece := <-pieceIO.InChan
+
+		if err := pieceIO.WritePiece(piece); err != nil {
+			pieceIO.OutChan <- WriteError{
+				Index: piece.Index,
+				Err:   err,
+			}
+		}
+	}
 }
 
 // PieceSize returns the size of the piece at pieceIndex, accounting for a shorter last piece.
