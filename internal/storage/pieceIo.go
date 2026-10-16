@@ -19,6 +19,7 @@ type WriteError struct {
 	Err   error
 }
 
+// TODO: Look at sync on reads and writes. Dont know if locks are needed
 // NewPieceIO creates (or truncates) the output file and preallocates it to the full length.
 func NewPieceIO(path string, totalLength, pieceLength int) (*PieceIO, error) {
 	if totalLength <= 0 || pieceLength <= 0 {
