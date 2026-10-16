@@ -6,9 +6,12 @@ import (
 	"github.com/Nohed/GoTorrent/internal/torrent"
 )
 
-const torrentName = "testdata/ubuntu-26.04.1-desktop-amd64.iso.torrent"
+const torrentName = "testdata/debian-13.7.0-amd64-netinst.iso.torrent"
 
 func main() {
+	man := newManager()
+	man.start("asd.torrent")
+
 	t, bt := torrent.ParseFile(torrentName)
 	if t == nil {
 		panic(bt)
