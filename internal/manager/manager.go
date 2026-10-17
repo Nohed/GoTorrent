@@ -128,7 +128,7 @@ func (m *Manager) runScheduler() {
 					"error", event.Err)
 			}
 
-			// Route events to your scheduling logic here.
+			// TOrrent events here
 			// For example: m.handleEvent(event)
 
 		case <-rechokeTicker.C:
