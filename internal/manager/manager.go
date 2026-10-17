@@ -1,177 +1,301 @@
 package manager
 
+/*
+RESPSIBILITY:
+	Manage the worker's lifecycle and overall resources.
+*/
 import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"strconv"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/Nohed/GoTorrent/internal/engine"
 	"github.com/Nohed/GoTorrent/internal/peer"
-	"github.com/Nohed/GoTorrent/internal/storage"
+	"github.com/Nohed/GoTorrent/internal/torrent"
+	"github.com/Nohed/GoTorrent/internal/tracker"
 )
 
-// THIS STRUCT IS SHARED BETWEEN ALL WORKERS
 type Manager struct {
-	mutex      *sync.Mutex //syncronization between workers
-	peersMutex sync.Mutex
-	io         *storage.PieceIO       // write to disk
-	hashes     [][20]byte             //hashes of all the pieces
-	have       []bool                 //pieces that are downloaded and done
-	inflight   map[int]*storage.Piece // pieces currently being downloaded
-	Peers      map[*peer.Peer]struct{}
+	torrent       *torrent.Torrent
+	trackerClient *tracker.Client
+
+	log *slog.Logger
+
+	peerID   [20]byte
+	port     uint16
+	maxPeers int
+
+	mu          sync.Mutex
+	workers     map[string]*engine.Worker
+	connections map[string]*peer.Connection
+	knownPeers  map[string]struct{}
+	pending     int // Handshakes in flight
+
+	events chan Event // For workers to pass data back to manager
+
+	ctx    context.Context    // When the gorotuines should to stop
+	cancel context.CancelFunc // send cancel
+	wg     sync.WaitGroup     // Wait until routines are finnished
+
+	downloaded atomic.Uint64
+	uploaded   atomic.Uint64
+
+	started bool
+	stopped bool
 }
 
-// NewManager creates and initializes a new piece Manager.
-func NewManager(io *storage.PieceIO, hashes [][20]byte) *Manager {
-	return &Manager{
-		mutex:    &sync.Mutex{},
-		io:       io,
-		hashes:   hashes,
-		have:     make([]bool, len(hashes)), // All pieces start as not downloaded
-		inflight: make(map[int]*storage.Piece),
-		Peers:    make(map[*peer.Peer]struct{}),
+func NewManager(newTorrent *torrent.Torrent, port uint16, maxConnections int, logger *slog.Logger) (*Manager, error) {
+
+	if newTorrent == nil {
+		return nil, fmt.Errorf("torrent is nil")
 	}
-}
-
-// NextRequest picks a block this peer can supply.
-// peerHas reports whether the peer has a given piece.
-func (manager *Manager) NextRequest(peerHas func(int) bool) (pieceIndex, blockBegin, blockLength int, ok bool) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
-
-	// 1. Finish pieces already started (keeps few partial pieces in memory, paralellalize pieces).
-	for pieceIndex, piece := range manager.inflight {
-		if peerHas(pieceIndex) {
-			if blockBegin, blockLength, ok := piece.NextUnrequested(); ok {
-				return pieceIndex, blockBegin, blockLength, true
-			}
-		}
+	if maxConnections <= 0 {
+		return nil, fmt.Errorf("max connections must be positive int")
 	}
-
-	// 2. Start a new piece (replace with rarest-first later maybe).
-	for pieceIndex := range manager.have {
-		if !manager.have[pieceIndex] &&
-			manager.inflight[pieceIndex] == nil &&
-			peerHas(pieceIndex) {
-
-			piece := storage.NewPiece(
-				pieceIndex,
-				manager.io.PieceSize(pieceIndex),
-				manager.hashes[pieceIndex],
-			)
-
-			manager.inflight[pieceIndex] = piece
-
-			blockBegin, blockLength, _ := piece.NextUnrequested()
-			return pieceIndex, blockBegin, blockLength, true
-		}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	return 0, 0, 0, false
-}
-
-// AddBlock returns done=true when the piece is completed, verified, and written.
-func (manager *Manager) AddBlock(pieceIndex, blockBegin int, blockData []byte) (done bool, err error) {
-	manager.mutex.Lock()
-
-	piece := manager.inflight[pieceIndex]
-	if piece == nil { // unsolicited block or duplicate after completion
-		manager.mutex.Unlock()
-		return false, nil
+	// Create peerID
+	m := &Manager{
+		torrent:       newTorrent,
+		trackerClient: tracker.NewClient(newTorrent.Announce),
+		log:           logger,
+		port:          port,
+		maxPeers:      maxConnections,
+		workers:       make(map[string]*engine.Worker),
+		connections:   make(map[string]*peer.Connection),
+		knownPeers:    make(map[string]struct{}),
+		events:        make(chan Event, 256),
 	}
 
-	if err := piece.AddBlock(blockBegin, blockData); err != nil {
-		manager.mutex.Unlock()
-		return false, err
+	// Generate random 20 byte peer id for ourself
+	if _, err := rand.Read(m.peerID[:]); err != nil {
+		return nil, fmt.Errorf("generate peer ID: %w", err)
 	}
 
-	if !piece.Complete() {
-		manager.mutex.Unlock()
-		return false, nil
+	return m, nil
+}
+
+func (m *Manager) Start() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.started {
+		return fmt.Errorf("manager already started")
+	}
+	if m.stopped {
+		return fmt.Errorf("manager already stopped")
 	}
 
-	delete(manager.inflight, pieceIndex) // we now own the piece exclusively
-	manager.mutex.Unlock()
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.started = true
 
-	// Hash + disk I/O outside the lock.
-	if err := manager.io.WritePiece(piece); err != nil {
-		piece.Reset()
+	m.wg.Add(1) // adds to waitgroup
+	go func() {
+		defer m.wg.Done() // On function exit, tell wg were done
+		m.runScheduler()
+	}()
 
-		manager.mutex.Lock()
-		manager.inflight[pieceIndex] = piece // back in the pool to retry
-		manager.mutex.Unlock()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.runTracker()
+	}()
 
-		return false, err
-	}
-
-	manager.mutex.Lock()
-	manager.have[pieceIndex] = true
-	manager.mutex.Unlock()
-
-	manager.broadcastHave(pieceIndex) // tell every connected peer	we have new data
-	return true, nil
-
+	return nil
 }
 
-// Have reports whether the requested piece has been downloaded and verified.
-func (manager *Manager) Have(pieceIndex int) bool {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+func (m *Manager) runScheduler() {
+	rechokeTicker := time.NewTicker(10 * time.Second)
+	optimisticTicker := time.NewTicker(30 * time.Second)
+	defer rechokeTicker.Stop()
+	defer optimisticTicker.Stop()
 
-	return pieceIndex >= 0 &&
-		pieceIndex < len(manager.have) &&
-		manager.have[pieceIndex]
-}
-
-// Release is called for each block belonging to a dead or choked peer's inflight set.
-func (manager *Manager) Release(pieceIndex, blockBegin int) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
-
-	if piece := manager.inflight[pieceIndex]; piece != nil {
-		piece.ReleaseBlock(blockBegin)
-	}
-}
-func (manager *Manager) ReadBlock(i, begin, length int) ([]byte, error) {
-	return manager.io.ReadBlock(i, begin, length)
-}
-func (manager *Manager) NumPieces() int {
-	return len(manager.hashes)
-}
-func (manager *Manager) AddPeer(p *peer.Peer) {
-	manager.peersMutex.Lock()
-	manager.Peers[p] = struct{}{}
-	manager.peersMutex.Unlock()
-}
-
-func (manager *Manager) RemovePeer(p *peer.Peer) {
-	manager.peersMutex.Lock()
-	delete(manager.Peers, p)
-	manager.peersMutex.Unlock()
-}
-
-func (manager *Manager) broadcastHave(index int) {
-	manager.peersMutex.Lock()
-	snapshot := make([]*peer.Peer, 0, len(manager.Peers))
-	for p := range manager.Peers {
-		snapshot = append(snapshot, p)
-	}
-	manager.peersMutex.Unlock()
-
-	for _, p := range snapshot {
+	for {
 		select {
-		case p.Out <- peer.NewHave(index):
-		case <-p.Done:
-		default: // queue full, skip this peer
+		case event := <-m.events:
+			if event.Err != nil {
+				m.log.Warn("peer event error",
+					"peer", event.PeerID,
+					"error", event.Err)
+			}
+
+			// Route events to your scheduling logic here.
+			// For example: m.handleEvent(event)
+
+		case <-rechokeTicker.C:
+			// m.recalculateChoking()
+
+		case <-optimisticTicker.C:
+			// m.rotateOptimisticUnchoke()
+
+		case <-m.ctx.Done(): // cancel signal
+			return
 		}
 	}
 }
 
-func (manager *Manager) Needs(peerHas func(int) bool) bool {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+func (m *Manager) runTracker() {
+	for {
+		response, err := m.trackerClient.Announce(m.ctx, tracker.AnnounceRequest{
+			InfoHash:   m.torrent.InfoHash,
+			PeerID:     m.peerID,
+			Port:       m.port,
+			Uploaded:   int64(m.uploaded.Load()),
+			Downloaded: int64(m.downloaded.Load()),
+			Left:       int64(m.torrent.Length) - int64(m.downloaded.Load()),
+		})
 
-	for i, have := range manager.have {
-		if !have && peerHas(i) {
-			return true
+		if err != nil {
+			if m.ctx.Err() != nil {
+				return
+			}
+			m.log.Warn("tracker announce failed", "error", err)
+			if !m.waitFor(time.Minute) {
+				return
+			}
+			continue
+		}
+
+		for _, peer := range response.Peers {
+			if m.ctx.Err() != nil {
+				return
+			}
+
+			addr := net.JoinHostPort(
+				peer.IP.String(),
+				strconv.Itoa(int(peer.Port)),
+			)
+			m.connectToPeer(addr)
+		}
+
+		interval := time.Duration(response.Interval) * time.Second
+		if interval <= 0 {
+			interval = time.Minute
+		}
+		if !m.waitFor(interval) {
+			return
 		}
 	}
-	return false
+}
+
+func (m *Manager) waitFor(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-m.ctx.Done():
+		return false
+	}
+}
+
+func (m *Manager) connectToPeer(addr string) {
+	m.mu.Lock()
+
+	if m.stopped || len(m.connections)+m.pending >= m.maxPeers {
+		m.mu.Unlock()
+		return
+	}
+	if _, exists := m.knownPeers[addr]; exists {
+		m.mu.Unlock()
+		return
+	}
+
+	m.knownPeers[addr] = struct{}{}
+	m.pending++ // reserve the slot
+
+	m.wg.Add(1)
+	m.mu.Unlock()
+
+	go func() {
+		defer m.wg.Done()
+
+		// Connects and handshakes
+		peer, err := peer.Connect(addr, m.torrent.InfoHash, m.peerID)
+
+		m.mu.Lock()
+		m.pending-- // Peer is either connected or release below
+		if err != nil {
+			delete(m.knownPeers, addr)
+			m.mu.Unlock()
+
+			if m.ctx.Err() == nil {
+				m.log.Debug("peer connection failed", "address", addr, "error", err)
+			}
+			return
+		}
+
+		if m.stopped {
+			delete(m.knownPeers, addr)
+			m.mu.Unlock()
+			_ = peer.Close()
+			return
+		}
+
+		m.connections[addr] = peer
+		m.mu.Unlock()
+
+		// Runs on every exit path: worker finished, errored, or ctx cancelled.
+		defer m.removePeer(addr)
+
+		m.runPeer(addr, conn)
+
+	}()
+}
+
+// removePeer frees the slot and lets the address be dialed again on a later announce.
+func (m *Manager) removePeer(addr string) {
+	m.mu.Lock()
+	conn := m.connections[addr]
+	delete(m.connections, addr)
+	delete(m.workers, addr)
+	delete(m.knownPeers, addr)
+	m.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close() // safe if the worker already closed it
+	}
+}
+
+// runPeer blocks until the peer session ends.
+func (m *Manager) runPeer(addr string, conn *peer.Connection) {
+	// TODO: build the worker, register it under m.mu in m.workers[addr],
+	// and run it with m.ctx. Return when it exits.
+
+	// This is called from inside the workers gorotuine
+}
+
+// Stop cancels background work, closes peer connections, and waits for manager goroutines to exit.
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	if !m.started || m.stopped {
+		m.mu.Unlock()
+		return
+	}
+
+	m.stopped = true
+	m.cancel()
+
+	// Copy peer connections under mutex
+	conns := make([]*peer.Connection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.mu.Unlock()
+
+	// Close all connections
+	for _, c := range conns {
+		_ = c.Close() // unblocks workers stuck on reads
+	}
+	m.wg.Wait() // Wait for routines (the workers) to exit
 }
