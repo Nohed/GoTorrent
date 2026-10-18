@@ -38,7 +38,7 @@ func NewPieceIO(path string, totalLength, pieceLength int) (*PieceIO, error) {
 	return &PieceIO{file: file, totalLength: totalLength, pieceLength: pieceLength}, nil
 }
 
-func (pieceIO *PieceIO) run() {
+func (pieceIO *PieceIO) Run() {
 	for {
 		piece := <-pieceIO.InChan
 
