@@ -8,6 +8,7 @@ RESPSIBILITY:
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,10 +37,10 @@ type Manager struct {
 	maxPeers int
 
 	mu          sync.Mutex
-	workers     map[string]*engine.Worker
-	connections map[string]*peer.Connection
-	knownPeers  map[string]struct{}
-	pending     int // Handshakes in flight
+	connections map[[20]byte]*peer.Connection // by remote PeerID
+	workers     map[[20]byte]*engine.Worker
+	knownPeers  map[string]struct{} // dialed addresses only (outbound dedup)
+	pending     int                 // Handshakes in flight
 
 	events chan Event // For workers to pass data back to manager
 
@@ -73,8 +74,8 @@ func NewManager(newTorrent *torrent.Torrent, port uint16, maxConnections int, lo
 		log:           logger,
 		port:          port,
 		maxPeers:      maxConnections,
-		workers:       make(map[string]*engine.Worker),
-		connections:   make(map[string]*peer.Connection),
+		workers:       make(map[[20]byte]*engine.Worker),
+		connections:   make(map[[20]byte]*peer.Connection),
 		knownPeers:    make(map[string]struct{}),
 		events:        make(chan Event, 256),
 	}
@@ -130,9 +131,7 @@ func (m *Manager) runScheduler() {
 		select {
 		case event := <-m.events:
 			if event.Err != nil {
-				m.log.Warn("peer event error",
-					"peer", event.PeerID,
-					"error", event.Err)
+				m.log.Warn("peer event error", "peer", hex.EncodeToString(event.PeerID[:]), "error", event.Err)
 			}
 
 			// TOrrent events here
@@ -158,7 +157,7 @@ func (m *Manager) runTracker() {
 			Port:       m.port,
 			Uploaded:   int64(m.uploaded.Load()),
 			Downloaded: int64(m.downloaded.Load()),
-			Left:       int64(m.torrent.Length) - int64(m.downloaded.Load()),
+			Left:       m.left(),
 		})
 
 		if err != nil {
@@ -172,14 +171,14 @@ func (m *Manager) runTracker() {
 			continue
 		}
 
-		for _, peer := range response.Peers {
+		for _, p := range response.Peers {
 			if m.ctx.Err() != nil {
 				return
 			}
 
 			addr := net.JoinHostPort(
-				peer.IP.String(),
-				strconv.Itoa(int(peer.Port)),
+				p.IP.String(),
+				strconv.Itoa(int(p.Port)),
 			)
 			m.connectToPeer(addr)
 		}
@@ -268,14 +267,22 @@ func (m *Manager) connectToPeer(addr string) {
 			_ = peerConn.Close()
 			return
 		}
-
-		m.connections[addr] = peer
+		// Can only check peerID after handshake
+		if _, dup := m.connections[peerConn.PeerID]; dup {
+			// Already connected to this peer
+			delete(m.knownPeers, addr)
+			m.mu.Unlock()
+			_ = peerConn.Close()
+			return
+		}
+		m.connections[peerConn.PeerID] = peerConn
 		m.mu.Unlock()
 
 		// Runs on every exit path: worker finished, errored, or ctx cancelled.
-		defer m.removePeer(addr)
+		defer m.removePeer(peerConn, addr)
 
-		m.runPeer(addr, peerConn)
+		m.log.Info("Connected to peer", peerConn.PeerID)
+		m.runPeer(peerConn)
 
 	}()
 }
@@ -284,45 +291,63 @@ func (m *Manager) acceptPeer(connection net.Conn) {
 	m.mu.Lock()
 	if m.stopped || len(m.connections)+m.pending >= m.maxPeers {
 		m.mu.Unlock()
-		return
-	}
-	if _, exists := m.knownPeers[connection.RemoteAddr().String()]; exists {
-		m.mu.Unlock()
+		_ = connection.Close()
 		return
 	}
 
-	m.knownPeers[connection.RemoteAddr().String()] = struct{}{}
 	m.pending++ // reserve the slot
 	m.wg.Add(1)
 	m.mu.Unlock()
 
-	go func(){
+	go func() {
 		defer m.wg.Done()
 
+		stop := context.AfterFunc(m.ctx, func() { _ = connection.Close() })
 		peerConn, err := peer.Accept(connection, m.torrent.InfoHash, m.peerID)
-	}
+		stop()
+
+		m.mu.Lock()
+		m.pending--
+		if err != nil {
+			m.mu.Unlock()
+			m.log.Debug("inbound handshake failed", "remote", connection.RemoteAddr(), "error", err)
+			return
+		}
+		if m.stopped {
+			m.mu.Unlock()
+			_ = peerConn.Close()
+			return
+		}
+
+		if _, dup := m.connections[peerConn.PeerID]; dup {
+			m.mu.Unlock()
+			_ = peerConn.Close()
+			return
+		}
+
+		m.connections[peerConn.PeerID] = peerConn
+		m.mu.Unlock()
+
+		defer m.removePeer(peerConn, "")
+		m.log.Info("Accepted connection from peer", peerConn.PeerID, "Current connections", len(m.connections))
+		m.runPeer(peerConn)
+	}()
 }
 
 // removePeer frees the slot and lets the address be dialed again on a later announce.
-func (m *Manager) removePeer(addr string) {
+func (m *Manager) removePeer(conn *peer.Connection, dialAddr string) {
 	m.mu.Lock()
-	conn := m.connections[addr]
-	delete(m.connections, addr)
-	delete(m.workers, addr)
-	delete(m.knownPeers, addr)
+	// Only evict our own entry, never a newer connection with the same PeerID.
+	if m.connections[conn.PeerID] == conn {
+		delete(m.connections, conn.PeerID)
+		delete(m.workers, conn.PeerID)
+	}
+	if dialAddr != "" {
+		delete(m.knownPeers, dialAddr)
+	}
 	m.mu.Unlock()
 
-	if conn != nil {
-		_ = conn.Close() // safe if the worker already closed it
-	}
-}
-
-// runPeer blocks until the peer session ends.
-func (m *Manager) runPeer(addr string, conn *peer.Connection) {
-	// TODO: build the worker, register it under m.mu in m.workers[addr],
-	// and run it with m.ctx. Return when it exits.
-
-	// This is called from inside the workers gorotuine
+	_ = conn.Close() // safe if the worker already closed it
 }
 
 // Stop cancels background work, closes peer connections, and waits for manager goroutines to exit.
@@ -348,4 +373,21 @@ func (m *Manager) Stop() {
 		_ = c.Close() // unblocks workers stuck on reads
 	}
 	m.wg.Wait() // Wait for routines (the workers) to exit
+}
+
+// Boundend left to 0
+func (m *Manager) left() int64 {
+	left := int64(m.torrent.Length) - int64(m.downloaded.Load())
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
+// runPeer blocks until the peer session ends.
+func (m *Manager) runPeer(conn *peer.Connection) {
+	// TODO: build the worker, register it under m.mu in m.workers[addr],
+	// and run it with m.ctx. Return when it exits.
+
+	// This is called from inside the workers gorotuine
 }
