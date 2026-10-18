@@ -3,7 +3,6 @@ package peer
 import (
 	"fmt"
 	"net"
-	"sync/atomic"
 )
 
 type BlockKey struct {
@@ -27,11 +26,12 @@ type Peer struct {
 	PeerChoking    bool
 	PeerInterested bool
 	AmInterested   bool
-	Bitfield       []byte
-	Inflight       map[BlockKey]struct{}
+	AmChoking      bool
+
+	Bitfield []byte
+	Inflight map[BlockKey]struct{}
 
 	// Touched by the mutliple things, need automic i think
-	AmChoking atomic.Bool
 
 	Done chan struct{} // closed when the peer shuts down
 }
