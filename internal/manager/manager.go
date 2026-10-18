@@ -4,9 +4,11 @@ package manager
 RESPSIBILITY:
 	Manage the worker's lifecycle and overall resources.
 */
+
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,6 +27,7 @@ import (
 type Manager struct {
 	torrent       *torrent.Torrent
 	trackerClient *tracker.Client
+	listener      net.Listener
 
 	log *slog.Logger
 
@@ -95,21 +98,25 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("manager already stopped")
 	}
 
+	// Accept new connections from peers
+	ln, err := net.Listen("tcp", ":"+strconv.Itoa(int(m.port)))
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	m.listener = ln
+	m.port = uint16(ln.Addr().(*net.TCPAddr).Port) // Update with real port on listenr, not just int
+
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.started = true
 
-	m.wg.Add(1) // adds to waitgroup
-	go func() {
-		defer m.wg.Done() // On function exit, tell wg were done
-		m.runScheduler()
-	}()
+	m.wg.Add(1)
+	go func() { defer m.wg.Done(); m.runScheduler() }()
 
 	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		m.runTracker()
-	}()
+	go func() { defer m.wg.Done(); m.runTracker() }()
 
+	m.wg.Add(1)
+	go func() { defer m.wg.Done(); m.runListener(ln) }()
 	return nil
 }
 
@@ -187,6 +194,26 @@ func (m *Manager) runTracker() {
 	}
 }
 
+func (m *Manager) runListener(ln net.Listener) {
+	stop := context.AfterFunc(m.ctx, func() { _ = ln.Close() })
+	defer stop()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if m.ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			m.log.Warn("accept failed", "error", err)
+			if !m.waitFor(time.Second) { // avoid a hot loop on persistent errors (e.g. fd exhaustion)
+				return
+			}
+			continue
+		}
+		m.acceptPeer(conn)
+	}
+}
+
 func (m *Manager) waitFor(d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -221,7 +248,7 @@ func (m *Manager) connectToPeer(addr string) {
 		defer m.wg.Done()
 
 		// Connects and handshakes
-		peer, err := peer.Connect(addr, m.torrent.InfoHash, m.peerID)
+		peerConn, err := peer.Connect(addr, m.torrent.InfoHash, m.peerID)
 
 		m.mu.Lock()
 		m.pending-- // Peer is either connected or release below
@@ -238,7 +265,7 @@ func (m *Manager) connectToPeer(addr string) {
 		if m.stopped {
 			delete(m.knownPeers, addr)
 			m.mu.Unlock()
-			_ = peer.Close()
+			_ = peerConn.Close()
 			return
 		}
 
@@ -248,9 +275,32 @@ func (m *Manager) connectToPeer(addr string) {
 		// Runs on every exit path: worker finished, errored, or ctx cancelled.
 		defer m.removePeer(addr)
 
-		m.runPeer(addr, conn)
+		m.runPeer(addr, peerConn)
 
 	}()
+}
+
+func (m *Manager) acceptPeer(connection net.Conn) {
+	m.mu.Lock()
+	if m.stopped || len(m.connections)+m.pending >= m.maxPeers {
+		m.mu.Unlock()
+		return
+	}
+	if _, exists := m.knownPeers[connection.RemoteAddr().String()]; exists {
+		m.mu.Unlock()
+		return
+	}
+
+	m.knownPeers[connection.RemoteAddr().String()] = struct{}{}
+	m.pending++ // reserve the slot
+	m.wg.Add(1)
+	m.mu.Unlock()
+
+	go func(){
+		defer m.wg.Done()
+
+		peerConn, err := peer.Accept(connection, m.torrent.InfoHash, m.peerID)
+	}
 }
 
 // removePeer frees the slot and lets the address be dialed again on a later announce.
