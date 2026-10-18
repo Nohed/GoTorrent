@@ -1,4 +1,4 @@
-package manager
+package engine
 
 /*
 RESPSIBILITY:
@@ -25,6 +25,50 @@ import (
 	"github.com/Nohed/GoTorrent/internal/tracker"
 )
 
+const (
+	EventPeerReady EventKind = iota
+	EventPeerClosed
+	EventPeerInterested
+	EventPeerNotInterested
+	EventPeerChoked
+	EventPeerUnchoked
+	EventHave
+	EventBlockReceived
+	EventBlockUploaded
+	EventReadDone
+)
+const (
+	commandInterested CommandKind = iota
+	commandNotInterested
+	commandChoke
+	commandUnchoke
+	commandHave
+	commandRequestBlock
+	commandCancelBlock
+)
+
+type CommandKind uint8
+type EventKind uint8
+
+// Commands passed to workers	(one channel per peer)
+type command struct {
+	cmd        CommandKind
+	pieceindex int // For request, cancel etc
+	being      int // --||--
+	length     int
+}
+
+// events got from workers	(one shared channel for all peers)
+type event struct {
+	Eve    EventKind
+	Sender [20]byte //Creater of event
+	Err    error
+
+	PieceIndex int
+	Begin      int
+	Data       []byte
+}
+
 type Manager struct {
 	torrent       *torrent.Torrent
 	trackerClient *tracker.Client
@@ -32,9 +76,9 @@ type Manager struct {
 
 	log *slog.Logger
 
-	peerID   [20]byte
-	port     uint16
-	maxPeers int
+	peerID   [20]byte // own id
+	port     uint16   // own listening port
+	maxPeers int      // MAx allowed connectiosn
 
 	mu          sync.Mutex
 	connections map[[20]byte]*peer.Connection // by remote PeerID
@@ -48,8 +92,8 @@ type Manager struct {
 	cancel context.CancelFunc // send cancel
 	wg     sync.WaitGroup     // Wait until routines are finnished
 
-	downloaded atomic.Uint64
-	uploaded   atomic.Uint64
+	downloaded atomic.Uint64 // Curernt staet
+	uploaded   atomic.Uint64 // --||--
 
 	started bool
 	stopped bool
@@ -281,7 +325,7 @@ func (m *Manager) connectToPeer(addr string) {
 		// Runs on every exit path: worker finished, errored, or ctx cancelled.
 		defer m.removePeer(peerConn, addr)
 
-		m.log.Info("Connected to peer", peerConn.PeerID)
+		m.log.Info("connected to peer", "peer", hex.EncodeToString(peerConn.PeerID[:]), "addr", addr)
 		m.runPeer(peerConn)
 
 	}()
@@ -390,4 +434,9 @@ func (m *Manager) runPeer(conn *peer.Connection) {
 	// and run it with m.ctx. Return when it exits.
 
 	// This is called from inside the workers gorotuine
+
+	// "m.workers" MAP CONTIANING WORKERS
+
+	// m.events = event channel to pass messages up to worker
+	worker := newWorker(conn, m.events)
 }
