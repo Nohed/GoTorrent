@@ -159,7 +159,7 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 		return
 	}
 
-	// Do we have any blocks inflight, if so release thenm TODO: FIX INFLIGHT?=??
+	// Do we have any blocks inflight, if so release thenm TODO: FIX INFLIGHT?=?? DO WE NEED INFLIGHT EVEN=??
 	// DOES WORKER track inflight?
 	for block := range p.Inflight {
 		if currentPiece := m.scheduler.inProgress[block.Index]; currentPiece != nil {
@@ -270,7 +270,11 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 
 	if piece.Complete() {
 		//dont take away inProgress yet! Wait until we get confirmation from IO that it actually went to disk and remove it on confirmation
-		m.scheduler.pieceIO.InChan <- piece
+		m.scheduler.pieceIO.Requests <- storage.DiskRequest{Kind: storage.DiskWrite,
+			SenderID:   p.Conn.PeerID,
+			PieceIndex: ev.PieceIndex,
+			Begin:      ev.Begin, Length: ev.Length,
+			Piece: piece}
 	}
 	//m.broadcastHave(index) //Do this now or when we finish writing???
 }
@@ -286,14 +290,22 @@ func (m *Manager) onBlockRequested(ev types.Event) {
 	}
 
 	if ev.PieceIndex < 0 || ev.PieceIndex >= m.scheduler.numPieces || ev.Begin < 0 || ev.Length <= 0 || ev.Length > maxRequestLen {
-		w.Stop() //idk if we do this
+		w.Stop() //Should we stop just becasue of this
 		return
 	}
 
-	if p.AmChoking || !p.PeerInterested || !m.scheduler.have[ev.PieceIndex] { //dont send
+	if p.AmChoking || !p.PeerInterested || !m.scheduler.have[ev.PieceIndex] { //dont send, we may have choked while message is in transit or something esle
 		return
 	}
 
+	req := storage.DiskRequest{
+		Kind:       storage.DiskRead,
+		SenderID:   ev.SenderID,
+		PieceIndex: ev.PieceIndex,
+		Begin:      ev.Begin,
+		Length:     ev.Length,
+	}
+	m.scheduler.pieceIO.Requests <- req
 }
 
 func (m *Manager) onBlockUploaded(ev types.Event)

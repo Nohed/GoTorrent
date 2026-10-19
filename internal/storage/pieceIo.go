@@ -83,11 +83,7 @@ func (pio *PieceIO) Run(ctx context.Context) {
 
 			switch req.Kind {
 			case DiskRead:
-				data, err := pio.ReadBlock(
-					req.PieceIndex,
-					req.Begin,
-					req.Length,
-				)
+				data, err := pio.ReadBlock(req.PieceIndex, req.Begin, req.Length)
 
 				ev = types.Event{
 					Eve:        types.EventDiskRead,
