@@ -20,10 +20,12 @@ import (
 	"github.com/Nohed/GoTorrent/internal/storage"
 	"github.com/Nohed/GoTorrent/internal/torrent"
 	"github.com/Nohed/GoTorrent/internal/tracker"
+	"github.com/Nohed/GoTorrent/internal/types"
 )
 
 type Manager struct {
-	torrent       *torrent.Torrent
+	torrent *torrent.Torrent
+
 	trackerClient *tracker.Client
 	scheduler     *scheduler
 	listener      net.Listener
@@ -41,7 +43,10 @@ type Manager struct {
 	knownPeers  map[string]struct{} // dialed addresses only (outbound dedup)
 	pending     int                 // Handshakes in flight
 
-	events chan Event // For workers to pass data back to manager
+	events chan types.Event // For workers to pass data back to manager
+
+	done     chan struct{} // closed once every piece is verified
+	doneOnce sync.Once
 
 	ctx    context.Context    // When the gorotuines should to stop
 	cancel context.CancelFunc // send cancel
@@ -64,23 +69,17 @@ func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnec
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	pieceIO, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create peerID
 	m := &Manager{
 		torrent:       newTorrent,
 		trackerClient: tracker.NewClient(newTorrent.Announce),
-		pieceIO:       pieceIO,
 		log:           logger,
 		port:          port,
 		maxPeers:      maxConnections,
 		workers:       make(map[[20]byte]*Worker),
 		connections:   make(map[[20]byte]*peer.Connection),
 		knownPeers:    make(map[string]struct{}),
-		events:        make(chan Event, 256),
+		events:        make(chan types.Event, 256),
 	}
 
 	// Generate random 20 byte peer id for ourself
@@ -88,6 +87,13 @@ func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnec
 		// CLoSE IO FILE?
 		return nil, fmt.Errorf("generate peer ID: %w", err)
 	}
+	io, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength)
+	if err != nil {
+		return nil, err
+	}
+
+	m.pieceIO = io
+	m.scheduler = newScheduler(newTorrent, m.pieceIO)
 
 	return m, nil
 }
@@ -155,4 +161,18 @@ func (m *Manager) Stop() {
 		_ = c.Close() // unblocks workers stuck on reads
 	}
 	m.wg.Wait() // Wait for routines (the workers) to exit
+}
+
+// Done returns a channel that is closed when all pieces have been
+// downloaded and verified. Use this to wait for completion.
+func (m *Manager) Done() <-chan struct{} {
+	return m.done
+}
+
+// Wait blocks until the download is complete or the manager is stopped.
+func (m *Manager) Wait() {
+	select {
+	case <-m.done:
+	case <-m.ctx.Done():
+	}
 }

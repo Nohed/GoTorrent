@@ -6,24 +6,25 @@ import (
 	"time"
 
 	"github.com/Nohed/GoTorrent/internal/peer"
+	"github.com/Nohed/GoTorrent/internal/types"
 )
 
 // TODO: should add tracking ( bad data, not sending and so on)
 type Worker struct {
 	Peer              *peer.Peer
-	OutGoingEvents    chan Event         //reference to managers channel
-	IncommingCommands chan Command       //own listening channel
+	OutGoingEvents    chan types.Event   //reference to managers channel
+	IncommingCommands chan types.Command //own listening channel
 	ctx               context.Context    // When the gorotuines should to stop
 	cancel            context.CancelFunc // send cancel
 }
 
 // TODO: We are passing a mutex as a copy, look at later
-func NewWorker(parent context.Context, conn peer.Connection, events chan Event, numPieces int) *Worker {
+func NewWorker(parent context.Context, conn peer.Connection, events chan types.Event, numPieces int) *Worker {
 	// CRETE OWN CHANNEL
 	ctx, cancel := context.WithCancel(parent)
 	return &Worker{
 		Peer:              peer.NewPeer(conn, numPieces),
-		IncommingCommands: make(chan Command, 256),
+		IncommingCommands: make(chan types.Command, 256),
 		OutGoingEvents:    events,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -38,7 +39,7 @@ func (w *Worker) Run() error {
 	go func() { errc <- w.readLoop() }()
 	go func() { errc <- w.writeLoop() }()
 
-	if err := w.emit(Event{Eve: EventPeerReady}); err != nil {
+	if err := w.emit(types.Event{Eve: types.EventPeerReady}); err != nil {
 		return err
 	}
 	err := <-errc           // first loop to stop ends the session
@@ -46,12 +47,12 @@ func (w *Worker) Run() error {
 	_ = w.Peer.Conn.Close() // unblock a read stuck on the socket
 	<-errc                  // wait for the other loop
 
-	_ = w.emit(Event{Eve: EventPeerClosed, Err: err})
+	_ = w.emit(types.Event{Eve: types.EventPeerClosed, Err: err})
 	return err
 }
 
 // called by manager to send command to peer!!!
-func (w *Worker) Send(cmd Command) bool {
+func (w *Worker) Send(cmd types.Command) bool {
 	select {
 	case w.IncommingCommands <- cmd:
 		return true
@@ -79,7 +80,7 @@ func (w *Worker) readLoop() error {
 	}
 }
 
-func (w *Worker) emit(e Event) error {
+func (w *Worker) emit(e types.Event) error {
 	e.SenderID = w.Peer.Conn.PeerID
 	select {
 	case w.OutGoingEvents <- e:
@@ -103,38 +104,42 @@ func (w *Worker) writeLoop() error {
 	}
 }
 
+func (w *Worker) Stop() {
+	w.cancel()
+	_ = w.Peer.Conn.Close()
+}
 func (w *Worker) handle(m *peer.Message) error {
 	switch m.ID {
 	case peer.MsgChoke:
-		return w.emit(Event{Eve: EventPeerChoked})
+		return w.emit(types.Event{Eve: types.EventPeerChoked})
 
 	case peer.MsgUnchoke:
-		return w.emit(Event{Eve: EventPeerUnchoked})
+		return w.emit(types.Event{Eve: types.EventPeerUnchoked})
 
 	case peer.MsgInterested:
-		return w.emit(Event{Eve: EventPeerInterested})
+		return w.emit(types.Event{Eve: types.EventPeerInterested})
 
 	case peer.MsgNotInterested:
-		return w.emit(Event{Eve: EventPeerNotInterested})
+		return w.emit(types.Event{Eve: types.EventPeerNotInterested})
 
 	case peer.MsgHave:
 		index, err := m.ParseHave()
 		if err != nil {
 			return err
 		}
-		return w.emit(Event{Eve: EventHave, PieceIndex: index})
+		return w.emit(types.Event{Eve: types.EventHave, PieceIndex: index})
 
 	case peer.MsgBitfield:
 		// The manager validates the length against the piece count.
-		return w.emit(Event{Eve: EventBitfield, Data: m.Payload})
+		return w.emit(types.Event{Eve: types.EventBitfield, Data: m.Payload})
 
 	case peer.MsgRequest:
 		index, begin, length, err := m.ParseRequest()
 		if err != nil {
 			return err
 		}
-		return w.emit(Event{
-			Eve:        EventBlockRequested,
+		return w.emit(types.Event{
+			Eve:        types.EventBlockRequested,
 			PieceIndex: index,
 			Begin:      begin,
 			Length:     length,
@@ -145,8 +150,8 @@ func (w *Worker) handle(m *peer.Message) error {
 		if err != nil {
 			return err
 		}
-		return w.emit(Event{
-			Eve:        EventBlockReceived,
+		return w.emit(types.Event{
+			Eve:        types.EventBlockReceived,
 			PieceIndex: index,
 			Begin:      begin,
 			Data:       data,
@@ -158,17 +163,17 @@ func (w *Worker) handle(m *peer.Message) error {
 	return nil // unknown IDs are ignored
 }
 
-func (w *Worker) createMessageOfCommand(cmd Command) (*peer.Message, error) {
+func (w *Worker) createMessageOfCommand(cmd types.Command) (*peer.Message, error) {
 	var msg *peer.Message
 
 	switch cmd.Cmd {
-	case commandInterested:
+	case types.commandInterested:
 		msg = peer.NewInterested()
-	case commandNotInterested:
+	case types.commandNotInterested:
 		msg = peer.NewNotInterested()
-	case commandChoke:
+	case types.commandChoke:
 		msg = peer.NewChoke()
-	case commandUnchoke:
+	case types.commandUnchoke:
 		msg = peer.NewUnchoke()
 	case commandHave:
 		msg = peer.NewHave(cmd.PieceIndex)
@@ -186,7 +191,7 @@ func (w *Worker) createMessageOfCommand(cmd Command) (*peer.Message, error) {
 	return msg, nil
 }
 
-func (w *Worker) execute(cmd Command) error {
+func (w *Worker) execute(cmd types.Command) error {
 	msg, err := w.createMessageOfCommand(cmd)
 	if err != nil {
 		return err
@@ -196,8 +201,8 @@ func (w *Worker) execute(cmd Command) error {
 	}
 
 	if cmd.Cmd == commandSend {
-		return w.emit(Event{
-			Eve:        EventBlockUploaded,
+		return w.emit(types.Event{
+			Eve:        types.EventBlockUploaded,
 			PieceIndex: cmd.PieceIndex,
 			Begin:      cmd.Begin,
 			Length:     len(cmd.Data),

@@ -1,19 +1,41 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
+
+	"github.com/Nohed/GoTorrent/internal/types"
 )
+
+type DiskRequestKind uint8
+
+const (
+	DiskRead DiskRequestKind = iota
+	DiskWrite
+)
+
+type DiskRequest struct {
+	Kind DiskRequestKind
+
+	SenderID [20]byte
+
+	PieceIndex int
+	Begin      int
+	Length     int
+
+	Piece *Piece // Used for writes
+}
 
 // PieceIO writes verified pieces to a single file on disk by listening on a channel and writing to an output if something goes wrong.
 type PieceIO struct {
 	file        *os.File
-	totalLength int // Length of the whole file in bytes
-	pieceLength int // Length of each piece (except possibly the last)
-	InChan      chan *Piece
-	OutChan     chan WriteError
-}
+	totalLength int
+	pieceLength int
 
+	Requests chan DiskRequest
+	events   chan<- types.Event
+}
 type WriteError struct {
 	Index int
 	Err   error
@@ -21,7 +43,8 @@ type WriteError struct {
 
 // TODO: Look at sync on reads and writes. Dont know if locks are needed
 // NewPieceIO creates (or truncates) the output file and preallocates it to the full length.
-func NewPieceIO(path string, totalLength, pieceLength int) (*PieceIO, error) {
+func NewPieceIO(path string, totalLength int, pieceLength int, events chan<- types.Event,
+) (*PieceIO, error) {
 	if totalLength <= 0 || pieceLength <= 0 {
 		return nil, fmt.Errorf("invalid sizes: length %d, piece length %d", totalLength, pieceLength)
 	}
@@ -30,22 +53,77 @@ func NewPieceIO(path string, totalLength, pieceLength int) (*PieceIO, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open output file: %w", err)
 	}
+
 	if err := file.Truncate(int64(totalLength)); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to preallocate file: %w", err)
+		return nil, fmt.Errorf("failed to resize output file: %w", err)
 	}
 
-	return &PieceIO{file: file, totalLength: totalLength, pieceLength: pieceLength}, nil
+	return &PieceIO{
+		file:        file,
+		totalLength: totalLength,
+		pieceLength: pieceLength,
+		Requests:    make(chan DiskRequest, 64),
+		events:      events,
+	}, nil
 }
 
-func (pieceIO *PieceIO) Run() {
+func (pio *PieceIO) Run(ctx context.Context) {
 	for {
-		piece := <-pieceIO.InChan
+		select {
+		case <-ctx.Done():
+			return
 
-		if err := pieceIO.WritePiece(piece); err != nil {
-			pieceIO.OutChan <- WriteError{
-				Index: piece.Index,
-				Err:   err,
+		case req, ok := <-pio.Requests:
+			if !ok {
+				return
+			}
+
+			var ev types.Event
+
+			switch req.Kind {
+			case DiskRead:
+				data, err := pio.ReadBlock(
+					req.PieceIndex,
+					req.Begin,
+					req.Length,
+				)
+
+				ev = types.Event{
+					Eve:        types.EventDiskRead,
+					SenderID:   req.SenderID,
+					PieceIndex: req.PieceIndex,
+					Begin:      req.Begin,
+					Length:     req.Length,
+					Data:       data,
+					Err:        err,
+				}
+
+			case DiskWrite:
+				var err error
+
+				if req.Piece == nil {
+					err = fmt.Errorf("missing piece for disk write")
+				} else {
+					err = pio.WritePiece(req.Piece)
+				}
+
+				ev = types.Event{
+					Eve:        types.EventDiskWrite,
+					SenderID:   req.SenderID,
+					PieceIndex: req.PieceIndex,
+					Err:        err,
+				}
+
+			default:
+				// Log or handle invalid request kinds here.
+				continue
+			}
+
+			select {
+			case pio.events <- ev:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}

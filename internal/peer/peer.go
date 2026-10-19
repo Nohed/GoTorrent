@@ -16,9 +16,7 @@ const (
 //THIS STRUCT IS NOT SHARED BETWEEN ALL WORKERS AND IS UNIQUE FOR EACH ONE
 
 type Peer struct {
-	Conn Connection
-	Out  chan *Message // private outbound queue
-
+	Conn      Connection
 	NumPieces int
 
 	// Only the read loop touches these
@@ -28,19 +26,16 @@ type Peer struct {
 	AmChoking      bool
 
 	Bitfield []byte
-	Inflight map[BlockKey]struct{}
 }
 
 // Count is number of pieces that we can fetch
 func NewPeer(conn Connection, count int) *Peer {
 	p := &Peer{
 		Conn:        conn,
-		Out:         make(chan *Message, OutQueueLen),
 		NumPieces:   count,
 		PeerChoking: true,
 		AmChoking:   true,
 		Bitfield:    make([]byte, (count+7)/8),
-		Inflight:    make(map[BlockKey]struct{}),
 	}
 	return p
 }
