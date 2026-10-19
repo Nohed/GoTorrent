@@ -22,6 +22,7 @@ const (
 	commandHave
 	commandRequestBlock
 	commandCancelBlock
+	commandSendBitfield
 	commandSend
 )
 
