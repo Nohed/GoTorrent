@@ -8,6 +8,12 @@ import (
 
 const torrentName = "testdata/debian-13.7.0-amd64-netinst.iso.torrent"
 
+/*
+1. PArse torrent
+2. start manager.
+3. print progress.
+4. stop on complete
+*/
 func main() {
 	man := newManager()
 	man.start("asd.torrent")

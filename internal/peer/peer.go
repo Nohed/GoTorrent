@@ -2,7 +2,6 @@ package peer
 
 import (
 	"fmt"
-	"net"
 )
 
 type BlockKey struct {
@@ -17,7 +16,7 @@ const (
 //THIS STRUCT IS NOT SHARED BETWEEN ALL WORKERS AND IS UNIQUE FOR EACH ONE
 
 type Peer struct {
-	Conn net.Conn
+	Conn Connection
 	Out  chan *Message // private outbound queue
 
 	NumPieces int
@@ -30,24 +29,19 @@ type Peer struct {
 
 	Bitfield []byte
 	Inflight map[BlockKey]struct{}
-
-	// Touched by the mutliple things, need automic i think
-
-	Done chan struct{} // closed when the peer shuts down
 }
 
 // Count is number of pieces that we can fetch
-func NewPeer(conn net.Conn, count int) *Peer {
+func NewPeer(conn Connection, count int) *Peer {
 	p := &Peer{
 		Conn:        conn,
 		Out:         make(chan *Message, OutQueueLen),
 		NumPieces:   count,
 		PeerChoking: true,
+		AmChoking:   true,
 		Bitfield:    make([]byte, (count+7)/8),
 		Inflight:    make(map[BlockKey]struct{}),
-		Done:        make(chan struct{}),
 	}
-	p.AmChoking.Store(true)
 	return p
 }
 

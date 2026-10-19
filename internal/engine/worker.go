@@ -1,37 +1,55 @@
 package engine
 
 import (
+	"context"
+	"fmt"
 	"log"
-	"net"
 	"time"
 
-	"github.com/Nohed/GoTorrent/internal/manager"
 	"github.com/Nohed/GoTorrent/internal/peer"
 )
 
 // TODO: should add tracking ( bad data, not sending and so on)
 type Worker struct {
-	Peer *peer.Peer
-	Mgr  *manager.Manager
+	Peer              *peer.Peer
+	OutGoingEvents    chan Event         //reference to managers channel
+	IncommingCommands chan Command       //own listening channel
+	ctx               context.Context    // When the gorotuines should to stop
+	cancel            context.CancelFunc // send cancel
 }
 
-func NewWorker(conn net.Conn, mgr *manager.Manager) *Worker {
+func NewWorker(parent context.Context, conn peer.Connection, events chan Event, numPieces int) *Worker {
+	// CRETE OWN CHANNEL
+	ctx, cancel := context.WithCancel(parent)
 	return &Worker{
-		Peer: peer.NewPeer(conn, mgr.NumPieces()),
-		Mgr:  mgr,
+		Peer:              peer.NewPeer(conn, numPieces),
+		IncommingCommands: make(chan Command, 256),
+		OutGoingEvents:    events,
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 }
 
 func (w *Worker) Run() error {
 
 }
+
+func (w *Worker) Send(cmd Command) bool {
+	select {
+	case w.commands <- cmd:
+		return true
+	default:
+		return false
+	}
+}
+
 func (w *Worker) readLoop() error {
 	p := w.Peer
 	for {
 		// A dead peer sends nothing, not even keep-alives
-		p.Conn.SetReadDeadline(time.Now().Add(3 * time.Minute))
+		p.Conn.Conn.SetReadDeadline(time.Now().Add(3 * time.Minute))
 
-		msg, err := peer.ReadMessage(p.Conn)
+		msg, err := peer.ReadMessage(p.Conn.Conn)
 		if err != nil {
 			return err
 		}
@@ -44,8 +62,28 @@ func (w *Worker) readLoop() error {
 	}
 }
 
-func (w *Worker) writeLoop() {
+func (w *Worker) emit(e Event) error {
+	e.SenderID = w.Peer.Conn.PeerID
+	select {
+	case w.OutGoingEvents <- e:
+		return nil
+	case <-w.parent.Done():
+		return w.parent.Err()
+	}
+}
 
+func (w *Worker) writeLoop() error {
+	// TODO: send a keep-alive every ~2 minutes when idle.
+	for {
+		select {
+		case cmd := <-w.IncommingCommands:
+			if err := w.execute(cmd); err != nil {
+				return err
+			}
+		case <-w.ctx.Done():
+			return nil
+		}
+	}
 }
 
 func (w *Worker) releaseAll() {
@@ -114,54 +152,102 @@ func (w *Worker) handleRequest(index, begin, length int) {
 }
 
 func (w *Worker) handle(m *peer.Message) error {
-	p := w.Peer
 	switch m.ID {
 	case peer.MsgChoke:
-		p.PeerChoking = true
-		w.releaseAll() // our requests are dead, give blocks back
+		return w.emit(Event{Eve: EventPeerChoked})
 
 	case peer.MsgUnchoke:
-		p.PeerChoking = false
-		w.fillPipeline()
+		return w.emit(Event{Eve: EventPeerUnchoked})
 
 	case peer.MsgInterested:
-		p.PeerInterested = true
+		return w.emit(Event{Eve: EventPeerInterested})
 
 	case peer.MsgNotInterested:
-		p.PeerInterested = false
+		return w.emit(Event{Eve: EventPeerNotInterested})
 
 	case peer.MsgHave:
 		index, err := m.ParseHave()
 		if err != nil {
 			return err
 		}
-		if err := p.SetPiece(index); err != nil {
-			return err
-		}
-		w.updateInterest()
-		w.fillPipeline()
+		return w.emit(Event{Eve: EventHave, PieceIndex: index})
 
 	case peer.MsgBitfield:
-		if err := p.SetBitfield(m.Payload); err != nil {
-			return err
-		}
-		w.updateInterest()
+		// The manager validates the length against the piece count.
+		return w.emit(Event{Eve: EventBitfield, Data: m.Payload})
 
 	case peer.MsgRequest:
 		index, begin, length, err := m.ParseRequest()
 		if err != nil {
 			return err
 		}
-		w.handleRequest(index, begin, length)
+		return w.emit(Event{
+			Eve:        EventBlockRequested,
+			PieceIndex: index,
+			Begin:      begin,
+			Length:     length,
+		})
 
 	case peer.MsgPiece:
 		index, begin, data, err := m.ParsePiece()
 		if err != nil {
 			return err
 		}
-		w.handleBlock(index, begin, data)
+		return w.emit(Event{
+			Eve:        EventBlockReceived,
+			PieceIndex: index,
+			Begin:      begin,
+			Data:       data,
+		})
 
 	case peer.MsgCancel:
+		// Ignored for now: uploads are written immediately, nothing to cancel.
 	}
 	return nil // unknown IDs are ignored
+}
+
+func (w *Worker) createMessageOfCommand(cmd Command) (*peer.Message, error) {
+	var msg *peer.Message
+
+	switch cmd.Cmd {
+	case commandInterested:
+		msg = peer.NewInterested()
+	case commandNotInterested:
+		msg = peer.NewNotInterested()
+	case commandChoke:
+		msg = peer.NewChoke()
+	case commandUnchoke:
+		msg = peer.NewUnchoke()
+	case commandHave:
+		msg = peer.NewHave(cmd.PieceIndex)
+	case commandRequestBlock:
+		msg = peer.NewRequest(cmd.PieceIndex, cmd.Begin, cmd.Length)
+	case commandCancelBlock:
+		msg = peer.NewCancel(cmd.PieceIndex, cmd.Begin, cmd.Length)
+	case commandSend:
+		msg = peer.NewPiece(cmd.PieceIndex, cmd.Begin, cmd.Data)
+	default:
+		return nil, fmt.Errorf("unknown command %d", cmd.Cmd)
+	}
+	return msg, nil
+}
+
+func (w *Worker) execute(cmd Command) error {
+	msg, err := w.createMessageOfCommand(cmd)
+	if err != nil {
+		return err
+	}
+	if err := w.Peer.Conn.Send(msg); err != nil {
+		return err
+	}
+
+	if cmd.Cmd == commandSend {
+		return w.emit(Event{
+			Eve:        EventBlockUploaded,
+			PieceIndex: cmd.PieceIndex,
+			Begin:      cmd.Begin,
+			Length:     len(cmd.Data),
+		})
+	}
+	return nil
 }

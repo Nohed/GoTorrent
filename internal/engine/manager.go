@@ -8,8 +8,6 @@ RESPSIBILITY:
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,62 +15,19 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/Nohed/GoTorrent/internal/engine"
 	"github.com/Nohed/GoTorrent/internal/peer"
+	"github.com/Nohed/GoTorrent/internal/storage"
 	"github.com/Nohed/GoTorrent/internal/torrent"
 	"github.com/Nohed/GoTorrent/internal/tracker"
 )
 
-const (
-	EventPeerReady EventKind = iota
-	EventPeerClosed
-	EventPeerInterested
-	EventPeerNotInterested
-	EventPeerChoked
-	EventPeerUnchoked
-	EventHave
-	EventBlockReceived
-	EventBlockUploaded
-	EventReadDone
-)
-const (
-	commandInterested CommandKind = iota
-	commandNotInterested
-	commandChoke
-	commandUnchoke
-	commandHave
-	commandRequestBlock
-	commandCancelBlock
-)
-
-type CommandKind uint8
-type EventKind uint8
-
-// Commands passed to workers	(one channel per peer)
-type command struct {
-	cmd        CommandKind
-	pieceindex int // For request, cancel etc
-	being      int // --||--
-	length     int
-}
-
-// events got from workers	(one shared channel for all peers)
-type event struct {
-	Eve    EventKind
-	Sender [20]byte //Creater of event
-	Err    error
-
-	PieceIndex int
-	Begin      int
-	Data       []byte
-}
-
 type Manager struct {
 	torrent       *torrent.Torrent
 	trackerClient *tracker.Client
+	scheduler     *scheduler
 	listener      net.Listener
+	pieceIO       *storage.PieceIO
 
 	log *slog.Logger
 
@@ -82,7 +37,7 @@ type Manager struct {
 
 	mu          sync.Mutex
 	connections map[[20]byte]*peer.Connection // by remote PeerID
-	workers     map[[20]byte]*engine.Worker
+	workers     map[[20]byte]*Worker
 	knownPeers  map[string]struct{} // dialed addresses only (outbound dedup)
 	pending     int                 // Handshakes in flight
 
@@ -92,14 +47,12 @@ type Manager struct {
 	cancel context.CancelFunc // send cancel
 	wg     sync.WaitGroup     // Wait until routines are finnished
 
-	downloaded atomic.Uint64 // Curernt staet
-	uploaded   atomic.Uint64 // --||--
+	downloaded, uploaded atomic.Uint64 // Curernt staet
 
-	started bool
-	stopped bool
+	started, stopped bool
 }
 
-func NewManager(newTorrent *torrent.Torrent, port uint16, maxConnections int, logger *slog.Logger) (*Manager, error) {
+func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnections int, logger *slog.Logger) (*Manager, error) {
 
 	if newTorrent == nil {
 		return nil, fmt.Errorf("torrent is nil")
@@ -111,14 +64,20 @@ func NewManager(newTorrent *torrent.Torrent, port uint16, maxConnections int, lo
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
+	pieceIO, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create peerID
 	m := &Manager{
 		torrent:       newTorrent,
 		trackerClient: tracker.NewClient(newTorrent.Announce),
+		pieceIO:       pieceIO,
 		log:           logger,
 		port:          port,
 		maxPeers:      maxConnections,
-		workers:       make(map[[20]byte]*engine.Worker),
+		workers:       make(map[[20]byte]*Worker),
 		connections:   make(map[[20]byte]*peer.Connection),
 		knownPeers:    make(map[string]struct{}),
 		events:        make(chan Event, 256),
@@ -126,6 +85,7 @@ func NewManager(newTorrent *torrent.Torrent, port uint16, maxConnections int, lo
 
 	// Generate random 20 byte peer id for ourself
 	if _, err := rand.Read(m.peerID[:]); err != nil {
+		// CLoSE IO FILE?
 		return nil, fmt.Errorf("generate peer ID: %w", err)
 	}
 
@@ -162,236 +122,14 @@ func (m *Manager) Start() error {
 
 	m.wg.Add(1)
 	go func() { defer m.wg.Done(); m.runListener(ln) }()
+
+	m.wg.Add(1)
+	go func() { defer m.wg.Done(); m.runIO() }()
 	return nil
 }
 
-func (m *Manager) runScheduler() {
-	rechokeTicker := time.NewTicker(10 * time.Second)
-	optimisticTicker := time.NewTicker(30 * time.Second)
-	defer rechokeTicker.Stop()
-	defer optimisticTicker.Stop()
-
-	for {
-		select {
-		case event := <-m.events:
-			if event.Err != nil {
-				m.log.Warn("peer event error", "peer", hex.EncodeToString(event.PeerID[:]), "error", event.Err)
-			}
-
-			// TOrrent events here
-			// For example: m.handleEvent(event)
-
-		case <-rechokeTicker.C:
-			// m.recalculateChoking()
-
-		case <-optimisticTicker.C:
-			// m.rotateOptimisticUnchoke()
-
-		case <-m.ctx.Done(): // cancel signal
-			return
-		}
-	}
-}
-
-func (m *Manager) runTracker() {
-	for {
-		response, err := m.trackerClient.Announce(m.ctx, tracker.AnnounceRequest{
-			InfoHash:   m.torrent.InfoHash,
-			PeerID:     m.peerID,
-			Port:       m.port,
-			Uploaded:   int64(m.uploaded.Load()),
-			Downloaded: int64(m.downloaded.Load()),
-			Left:       m.left(),
-		})
-
-		if err != nil {
-			if m.ctx.Err() != nil {
-				return
-			}
-			m.log.Warn("tracker announce failed", "error", err)
-			if !m.waitFor(time.Minute) {
-				return
-			}
-			continue
-		}
-
-		for _, p := range response.Peers {
-			if m.ctx.Err() != nil {
-				return
-			}
-
-			addr := net.JoinHostPort(
-				p.IP.String(),
-				strconv.Itoa(int(p.Port)),
-			)
-			m.connectToPeer(addr)
-		}
-
-		interval := time.Duration(response.Interval) * time.Second
-		if interval <= 0 {
-			interval = time.Minute
-		}
-		if !m.waitFor(interval) {
-			return
-		}
-	}
-}
-
-func (m *Manager) runListener(ln net.Listener) {
-	stop := context.AfterFunc(m.ctx, func() { _ = ln.Close() })
-	defer stop()
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if m.ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return
-			}
-			m.log.Warn("accept failed", "error", err)
-			if !m.waitFor(time.Second) { // avoid a hot loop on persistent errors (e.g. fd exhaustion)
-				return
-			}
-			continue
-		}
-		m.acceptPeer(conn)
-	}
-}
-
-func (m *Manager) waitFor(d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-timer.C:
-		return true
-	case <-m.ctx.Done():
-		return false
-	}
-}
-
-func (m *Manager) connectToPeer(addr string) {
-	m.mu.Lock()
-
-	if m.stopped || len(m.connections)+m.pending >= m.maxPeers {
-		m.mu.Unlock()
-		return
-	}
-	if _, exists := m.knownPeers[addr]; exists {
-		m.mu.Unlock()
-		return
-	}
-
-	m.knownPeers[addr] = struct{}{}
-	m.pending++ // reserve the slot
-
-	m.wg.Add(1)
-	m.mu.Unlock()
-
-	go func() {
-		defer m.wg.Done()
-
-		// Connects and handshakes
-		peerConn, err := peer.Connect(addr, m.torrent.InfoHash, m.peerID)
-
-		m.mu.Lock()
-		m.pending-- // Peer is either connected or release below
-		if err != nil {
-			delete(m.knownPeers, addr)
-			m.mu.Unlock()
-
-			if m.ctx.Err() == nil {
-				m.log.Debug("peer connection failed", "address", addr, "error", err)
-			}
-			return
-		}
-
-		if m.stopped {
-			delete(m.knownPeers, addr)
-			m.mu.Unlock()
-			_ = peerConn.Close()
-			return
-		}
-		// Can only check peerID after handshake
-		if _, dup := m.connections[peerConn.PeerID]; dup {
-			// Already connected to this peer
-			delete(m.knownPeers, addr)
-			m.mu.Unlock()
-			_ = peerConn.Close()
-			return
-		}
-		m.connections[peerConn.PeerID] = peerConn
-		m.mu.Unlock()
-
-		// Runs on every exit path: worker finished, errored, or ctx cancelled.
-		defer m.removePeer(peerConn, addr)
-
-		m.log.Info("connected to peer", "peer", hex.EncodeToString(peerConn.PeerID[:]), "addr", addr)
-		m.runPeer(peerConn)
-
-	}()
-}
-
-func (m *Manager) acceptPeer(connection net.Conn) {
-	m.mu.Lock()
-	if m.stopped || len(m.connections)+m.pending >= m.maxPeers {
-		m.mu.Unlock()
-		_ = connection.Close()
-		return
-	}
-
-	m.pending++ // reserve the slot
-	m.wg.Add(1)
-	m.mu.Unlock()
-
-	go func() {
-		defer m.wg.Done()
-
-		stop := context.AfterFunc(m.ctx, func() { _ = connection.Close() })
-		peerConn, err := peer.Accept(connection, m.torrent.InfoHash, m.peerID)
-		stop()
-
-		m.mu.Lock()
-		m.pending--
-		if err != nil {
-			m.mu.Unlock()
-			m.log.Debug("inbound handshake failed", "remote", connection.RemoteAddr(), "error", err)
-			return
-		}
-		if m.stopped {
-			m.mu.Unlock()
-			_ = peerConn.Close()
-			return
-		}
-
-		if _, dup := m.connections[peerConn.PeerID]; dup {
-			m.mu.Unlock()
-			_ = peerConn.Close()
-			return
-		}
-
-		m.connections[peerConn.PeerID] = peerConn
-		m.mu.Unlock()
-
-		defer m.removePeer(peerConn, "")
-		m.log.Info("Accepted connection from peer", peerConn.PeerID, "Current connections", len(m.connections))
-		m.runPeer(peerConn)
-	}()
-}
-
-// removePeer frees the slot and lets the address be dialed again on a later announce.
-func (m *Manager) removePeer(conn *peer.Connection, dialAddr string) {
-	m.mu.Lock()
-	// Only evict our own entry, never a newer connection with the same PeerID.
-	if m.connections[conn.PeerID] == conn {
-		delete(m.connections, conn.PeerID)
-		delete(m.workers, conn.PeerID)
-	}
-	if dialAddr != "" {
-		delete(m.knownPeers, dialAddr)
-	}
-	m.mu.Unlock()
-
-	_ = conn.Close() // safe if the worker already closed it
+func (m *Manager) runIO() {
+	m.pieceIO.Run()
 }
 
 // Stop cancels background work, closes peer connections, and waits for manager goroutines to exit.
@@ -417,26 +155,4 @@ func (m *Manager) Stop() {
 		_ = c.Close() // unblocks workers stuck on reads
 	}
 	m.wg.Wait() // Wait for routines (the workers) to exit
-}
-
-// Boundend left to 0
-func (m *Manager) left() int64 {
-	left := int64(m.torrent.Length) - int64(m.downloaded.Load())
-	if left < 0 {
-		return 0
-	}
-	return left
-}
-
-// runPeer blocks until the peer session ends.
-func (m *Manager) runPeer(conn *peer.Connection) {
-	// TODO: build the worker, register it under m.mu in m.workers[addr],
-	// and run it with m.ctx. Return when it exits.
-
-	// This is called from inside the workers gorotuine
-
-	// "m.workers" MAP CONTIANING WORKERS
-
-	// m.events = event channel to pass messages up to worker
-	worker := newWorker(conn, m.events)
 }
