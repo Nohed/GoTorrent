@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/Nohed/GoTorrent/internal/peer"
@@ -18,6 +17,7 @@ type Worker struct {
 	cancel            context.CancelFunc // send cancel
 }
 
+// TODO: We are passing a mutex as a copy, look at later
 func NewWorker(parent context.Context, conn peer.Connection, events chan Event, numPieces int) *Worker {
 	// CRETE OWN CHANNEL
 	ctx, cancel := context.WithCancel(parent)
@@ -30,13 +30,30 @@ func NewWorker(parent context.Context, conn peer.Connection, events chan Event, 
 	}
 }
 
+// Run blocks until the session ends and returns the error that ended it.
 func (w *Worker) Run() error {
+	defer w.cancel()
 
+	errc := make(chan error, 2) // buffered so neither loop can leak
+	go func() { errc <- w.readLoop() }()
+	go func() { errc <- w.writeLoop() }()
+
+	if err := w.emit(Event{Eve: EventPeerReady}); err != nil {
+		return err
+	}
+	err := <-errc           // first loop to stop ends the session
+	w.cancel()              // tell the write loop to stop
+	_ = w.Peer.Conn.Close() // unblock a read stuck on the socket
+	<-errc                  // wait for the other loop
+
+	_ = w.emit(Event{Eve: EventPeerClosed, Err: err})
+	return err
 }
 
+// called by manager to send command to peer!!!
 func (w *Worker) Send(cmd Command) bool {
 	select {
-	case w.commands <- cmd:
+	case w.IncommingCommands <- cmd:
 		return true
 	default:
 		return false
@@ -67,8 +84,8 @@ func (w *Worker) emit(e Event) error {
 	select {
 	case w.OutGoingEvents <- e:
 		return nil
-	case <-w.parent.Done():
-		return w.parent.Err()
+	case <-w.ctx.Done():
+		return w.ctx.Err()
 	}
 }
 
@@ -84,71 +101,6 @@ func (w *Worker) writeLoop() error {
 			return nil
 		}
 	}
-}
-
-func (w *Worker) releaseAll() {
-	p := w.Peer
-	for k := range p.Inflight {
-		w.Mgr.Release(k.Index, k.Begin)
-	}
-	clear(p.Inflight)
-}
-
-// fillPipeline keeps up to MaxPipeline block requests outstanding.
-func (w *Worker) fillPipeline() {
-	p := w.Peer
-	for !p.PeerChoking && len(p.Inflight) < peer.MaxPipeline {
-		idx, begin, length, ok := w.Mgr.NextRequest(p.Has)
-		if !ok {
-			return
-		}
-		p.Inflight[peer.BlockKey{Index: idx, Begin: begin}] = struct{}{}
-		p.Out <- peer.NewRequest(idx, begin, length)
-	}
-}
-
-func (w *Worker) updateInterest() {
-	p := w.Peer
-	want := w.Mgr.Needs(p.Has)
-
-	if want && !p.AmInterested {
-		p.AmInterested = true
-		p.Out <- peer.NewInterested()
-	} else if !want && p.AmInterested {
-		p.AmInterested = false
-		p.Out <- peer.NewNotInterested()
-	}
-}
-func (w *Worker) handleBlock(index, begin int, data []byte) {
-	p := w.Peer
-	key := peer.BlockKey{Index: index, Begin: begin}
-	if _, asked := p.Inflight[key]; !asked {
-		return // we never requested this block, ignore it
-	}
-	delete(p.Inflight, key)
-
-	if _, err := w.Mgr.AddBlock(index, begin, data); err != nil {
-		log.Printf("piece %d: %v", index, err)
-	}
-	w.fillPipeline() // a slot freed up, request another block
-}
-
-func (w *Worker) handleRequest(index, begin, length int) {
-	p := w.Peer
-	if p.AmChoking.Load() || !p.PeerInterested || !w.Mgr.Have(index) {
-		return
-	}
-	go func() {
-		data, err := w.Mgr.ReadBlock(index, begin, length)
-		if err != nil {
-			return // bad range from a hostile peer
-		}
-		select {
-		case p.Out <- peer.NewPiece(index, begin, data):
-		case <-p.Done:
-		default: // queue full, drop it
-		}
-	}()
 }
 
 func (w *Worker) handle(m *peer.Message) error {
@@ -226,6 +178,8 @@ func (w *Worker) createMessageOfCommand(cmd Command) (*peer.Message, error) {
 		msg = peer.NewCancel(cmd.PieceIndex, cmd.Begin, cmd.Length)
 	case commandSend:
 		msg = peer.NewPiece(cmd.PieceIndex, cmd.Begin, cmd.Data)
+	case commandSendBitfield:
+		msg = peer.NewBitfield(cmd.Data)
 	default:
 		return nil, fmt.Errorf("unknown command %d", cmd.Cmd)
 	}
@@ -251,3 +205,69 @@ func (w *Worker) execute(cmd Command) error {
 	}
 	return nil
 }
+
+/*
+func (w *Worker) releaseAll() {
+	p := w.Peer
+	for k := range p.Inflight {
+		w.Mgr.Release(k.Index, k.Begin)
+	}
+	clear(p.Inflight)
+}
+
+// fillPipeline keeps up to MaxPipeline block requests outstanding.
+func (w *Worker) fillPipeline() {
+	p := w.Peer
+	for !p.PeerChoking && len(p.Inflight) < peer.MaxPipeline {
+		idx, begin, length, ok := w.Mgr.NextRequest(p.Has)
+		if !ok {
+			return
+		}
+		p.Inflight[peer.BlockKey{Index: idx, Begin: begin}] = struct{}{}
+		p.Out <- peer.NewRequest(idx, begin, length)
+	}
+}
+
+func (w *Worker) updateInterest() {
+	p := w.Peer
+	want := w.Mgr.Needs(p.Has)
+
+	if want && !p.AmInterested {
+		p.AmInterested = true
+		p.Out <- peer.NewInterested()
+	} else if !want && p.AmInterested {
+		p.AmInterested = false
+		p.Out <- peer.NewNotInterested()
+	}
+}
+func (w *Worker) handleBlock(index, begin int, data []byte) {
+	p := w.Peer
+	key := peer.BlockKey{Index: index, Begin: begin}
+	if _, asked := p.Inflight[key]; !asked {
+		return // we never requested this block, ignore it
+	}
+	delete(p.Inflight, key)
+
+	if _, err := w.Mgr.AddBlock(index, begin, data); err != nil {
+		log.Printf("piece %d: %v", index, err)
+	}
+	w.fillPipeline() // a slot freed up, request another block
+}
+
+func (w *Worker) handleRequest(index, begin, length int) {
+	p := w.Peer
+	if p.AmChoking.Load() || !p.PeerInterested || !w.Mgr.Have(index) {
+		return
+	}
+	go func() {
+		data, err := w.Mgr.ReadBlock(index, begin, length)
+		if err != nil {
+			return // bad range from a hostile peer
+		}
+		select {
+		case p.Out <- peer.NewPiece(index, begin, data):
+		case <-p.Done:
+		default: // queue full, drop it
+		}
+	}()
+}*/
