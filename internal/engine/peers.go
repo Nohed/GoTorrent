@@ -10,7 +10,7 @@ import (
 )
 
 // runPeer blocks until the peer session ends.
-func (m *Manager) runPeer(peerID [20]byte, conn peer.Connection) {
+func (m *Manager) runPeer(peerID [20]byte, conn *peer.Connection) {
 	// TODO: build the worker, register it under m.mu in m.workers[addr],
 	// and run it with m.ctx. Return when it exits.
 
@@ -94,7 +94,7 @@ func (m *Manager) acceptPeer(connection net.Conn) {
 
 		defer m.removePeer(peerConn, "")
 		m.log.Info("Accepted connection from peer", "ID", hex.EncodeToString(peerConn.PeerID[:]), "Current connections", len(m.connections))
-		m.runPeer(peerConn.PeerID, *peerConn)
+		m.runPeer(peerConn.PeerID, peerConn)
 	}()
 }
 
@@ -155,7 +155,7 @@ func (m *Manager) connectToPeer(addr string) {
 		defer m.removePeer(peerConn, addr)
 
 		m.log.Info("connected to peer", "peer", hex.EncodeToString(peerConn.PeerID[:]), "addr", addr)
-		m.runPeer(peerConn.PeerID, *peerConn)
+		m.runPeer(peerConn.PeerID, peerConn)
 
 	}()
 }

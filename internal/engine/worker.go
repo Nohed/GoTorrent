@@ -18,8 +18,7 @@ type Worker struct {
 	cancel            context.CancelFunc // send cancel
 }
 
-// TODO: We are passing a mutex as a copy, look at later
-func NewWorker(parent context.Context, conn peer.Connection, events chan types.Event, numPieces int) *Worker {
+func NewWorker(parent context.Context, conn *peer.Connection, events chan types.Event, numPieces int) *Worker {
 	// CRETE OWN CHANNEL
 	ctx, cancel := context.WithCancel(parent)
 	return &Worker{

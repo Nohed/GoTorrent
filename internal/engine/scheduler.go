@@ -38,6 +38,7 @@ type scheduler struct {
 	Bitfield     []byte
 }
 
+// TODO: SEND() RETURNS A BOOL, check for each transmission
 // TODO: NEED TO HANDLE SEEDING
 func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 	n := len(t.PieceHashes)
@@ -59,14 +60,14 @@ func (m *Manager) runScheduler() {
 
 	for {
 		select {
-		case event := <-m.events:
+		case event := <-m.events: // WHat hjappends i f a client crashed?
 			if event.Err != nil {
 				m.log.Warn("peer event error", "peer", hex.EncodeToString(event.SenderID[:]), "error", event.Err)
 			}
 			m.handleEvent(event)
 
 		case <-rechokeTicker.C:
-			m.scheduler.changeChoked() // Keeps track of optimistic vs regular choking itself
+			m.scheduler.changeChoked(m) // Keeps track of optimistic vs regular choking itself
 
 		case <-m.ctx.Done(): // cancel signal
 			return
@@ -74,16 +75,30 @@ func (m *Manager) runScheduler() {
 	}
 }
 
-func (s *scheduler) changeChoked() {
+func (s *scheduler) changeChoked(m *Manager) {
 	dec := s.choker.RecalculateChoking()
 
+	// -- Change internal state
 	for _, p := range dec.Choke {
 		s.peers[p.Conn.PeerID].AmChoking = true
+		m.mu.Lock()
+		w, ok := m.workers[p.Conn.PeerID]
+		m.mu.Unlock()
+		if ok {
+			w.Send(types.Command{Cmd: types.CommandChoke})
+		}
 	}
 
 	for _, p := range dec.Unchoke {
 		s.peers[p.Conn.PeerID].AmChoking = false
+		m.mu.Lock()
+		w, ok := m.workers[p.Conn.PeerID]
+		m.mu.Unlock()
+		if ok {
+			w.Send(types.Command{Cmd: types.CommandUnchoke})
+		}
 	}
+
 }
 
 // Boundend left to 0
@@ -116,13 +131,13 @@ func (m *Manager) handleEvent(ev types.Event) {
 	case types.EventHave:
 		m.onHave(ev)
 	case types.EventBlockReceived:
-		m.onBlockReceived(ev) // Write to disk
+		m.onBlockReceived(ev)
 	case types.EventBlockRequested:
 		m.onBlockRequested(ev)
 	case types.EventBlockUploaded:
 		m.onBlockUploaded(ev)
-	case types.EventDiskRead: // THIS?
-		//m.onReadDone(ev)
+	case types.EventDiskRead:
+		m.onDiskRead(ev)
 	}
 }
 
@@ -160,11 +175,11 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 
 	// Do we have any blocks inflight, if so release thenm TODO: FIX INFLIGHT?=?? DO WE NEED INFLIGHT EVEN=??
 	// DOES WORKER track inflight?
-	for block := range p.Inflight {
+	/*for block := range p.Inflight {
 		if currentPiece := m.scheduler.inProgress[block.Index]; currentPiece != nil {
 			currentPiece.ReleaseBlock(block.Begin)
 		}
-	}
+	}*/
 
 	for i := 0; i < m.scheduler.numPieces; i++ {
 		if p.Bfield.Has(i) {
@@ -199,6 +214,11 @@ func (m *Manager) onPeerUnchoked(ev types.Event) {
 	}
 
 	// TODO:
+
+	w := m.getWorkerForEvent(ev)
+	if w != nil {
+
+	}
 	// REQUEST PIOEICED HERE as we are yunchoked
 }
 
@@ -241,6 +261,7 @@ func (m *Manager) onHave(ev types.Event) {
 
 	if !p.PeerChoking && p.AmInterested {
 		// TODO: SEND PIECE TO requestor
+
 	}
 }
 
@@ -285,7 +306,8 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 }
 
 func (m *Manager) onBlockRequested(ev types.Event) {
-	w := m.workers[ev.SenderID]
+	w := m.getWorkerForEvent(ev)
+
 	if w == nil {
 		return
 	}
@@ -326,7 +348,7 @@ func (m *Manager) onDiskRead(ev types.Event) {
 		return // we choked them meanwhile, so don't upload
 	}
 
-	w := m.workers[ev.SenderID]
+	w := m.getWorkerForEvent(ev)
 	if w == nil {
 		return
 	}
@@ -363,12 +385,11 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 	} else { //Writing was successfull, notify peers and update bitfield
 		m.scheduler.have[ev.PieceIndex] = true
 		delete(m.scheduler.inProgress, ev.PieceIndex)
-		//Broadcasthave!!!!
+		m.broadcastHave(ev.PieceIndex)
 	}
 
 }
 
-// TODO:
 func (m *Manager) onBlockUploaded(ev types.Event) {
 	p, ok := m.getPeerForEvent(ev)
 	if !ok {
@@ -419,4 +440,24 @@ func (m *Manager) calcInterested(peerID [20]byte) {
 func (m *Manager) getPeerForEvent(ev types.Event) (*peer.Peer, bool) {
 	p, ok := m.scheduler.peers[ev.SenderID]
 	return p, ok
+}
+
+func (m *Manager) getWorkerForEvent(ev types.Event) *Worker {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	w := m.workers[ev.SenderID]
+
+	return w
+}
+
+func (m *Manager) broadcastHave(pieceIndex int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, w := range m.workers {
+		w.IncommingCommands <- types.Command{
+			Cmd:        types.CommandHave,
+			PieceIndex: pieceIndex,
+		}
+	}
 }
