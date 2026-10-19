@@ -42,7 +42,7 @@ func (m *Manager) runTracker() {
 			m.connectToPeer(addr)
 		}
 
-		interval := time.Duration(response.Interval) * time.Second
+		interval := response.Interval
 		if interval <= 0 {
 			interval = time.Minute
 		}

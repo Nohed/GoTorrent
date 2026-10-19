@@ -80,6 +80,7 @@ func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnec
 		connections:   make(map[[20]byte]*peer.Connection),
 		knownPeers:    make(map[string]struct{}),
 		events:        make(chan types.Event, 256),
+		done:          make(chan struct{}),
 	}
 
 	// Generate random 20 byte peer id for ourself
@@ -87,7 +88,7 @@ func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnec
 		// CLoSE IO FILE?
 		return nil, fmt.Errorf("generate peer ID: %w", err)
 	}
-	io, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength)
+	io, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength, m.events)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +136,7 @@ func (m *Manager) Start() error {
 }
 
 func (m *Manager) runIO() {
-	m.pieceIO.Run()
+	m.pieceIO.Run(m.ctx)
 }
 
 // Stop cancels background work, closes peer connections, and waits for manager goroutines to exit.

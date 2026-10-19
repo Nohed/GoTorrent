@@ -167,23 +167,23 @@ func (w *Worker) createMessageOfCommand(cmd types.Command) (*peer.Message, error
 	var msg *peer.Message
 
 	switch cmd.Cmd {
-	case types.commandInterested:
+	case types.CommandInterested:
 		msg = peer.NewInterested()
-	case types.commandNotInterested:
+	case types.CommandNotInterested:
 		msg = peer.NewNotInterested()
-	case types.commandChoke:
+	case types.CommandChoke:
 		msg = peer.NewChoke()
-	case types.commandUnchoke:
+	case types.CommandUnchoke:
 		msg = peer.NewUnchoke()
-	case commandHave:
+	case types.CommandHave:
 		msg = peer.NewHave(cmd.PieceIndex)
-	case commandRequestBlock:
+	case types.CommandRequestBlock:
 		msg = peer.NewRequest(cmd.PieceIndex, cmd.Begin, cmd.Length)
-	case commandCancelBlock:
+	case types.CommandCancelBlock:
 		msg = peer.NewCancel(cmd.PieceIndex, cmd.Begin, cmd.Length)
-	case commandSend:
+	case types.CommandSend:
 		msg = peer.NewPiece(cmd.PieceIndex, cmd.Begin, cmd.Data)
-	case commandSendBitfield:
+	case types.CommandSendBitfield:
 		msg = peer.NewBitfield(cmd.Data)
 	default:
 		return nil, fmt.Errorf("unknown command %d", cmd.Cmd)
@@ -200,7 +200,7 @@ func (w *Worker) execute(cmd types.Command) error {
 		return err
 	}
 
-	if cmd.Cmd == commandSend {
+	if cmd.Cmd == types.CommandSend {
 		return w.emit(types.Event{
 			Eve:        types.EventBlockUploaded,
 			PieceIndex: cmd.PieceIndex,

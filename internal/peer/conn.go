@@ -53,7 +53,7 @@ func Connect(addr string, infoHash, peerID [20]byte) (*Connection, error) {
 	}
 
 	conn.SetDeadline(time.Time{}) // clear it; per-operation deadlines from here on
-	return &Connection{Addr: addr, PeerID: IncomingHandshake.PeerID, conn: conn}, nil
+	return &Connection{Addr: addr, PeerID: IncomingHandshake.PeerID, Conn: conn}, nil
 }
 
 // Accept a incoming connection and handshake
@@ -84,20 +84,20 @@ func Accept(conn net.Conn, infoHash, peerID [20]byte) (*Connection, error) {
 		return nil, err
 	}
 	conn.SetDeadline(time.Time{})
-	return &Connection{Addr: conn.RemoteAddr().String(), PeerID: IncomingHandshake.PeerID, conn: conn}, nil
+	return &Connection{Addr: conn.RemoteAddr().String(), PeerID: IncomingHandshake.PeerID, Conn: conn}, nil
 }
 
 func (c *Connection) Send(m *Message) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	_, err := c.conn.Write(m.serialize())
+	c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_, err := c.Conn.Write(m.serialize())
 	return err
 }
 
 func (c *Connection) Receive() (*Message, error) {
-	c.conn.SetReadDeadline(time.Now().Add(readTimeout))
-	return ReadMessage(c.conn)
+	c.Conn.SetReadDeadline(time.Now().Add(readTimeout))
+	return ReadMessage(c.Conn)
 }
 
-func (c *Connection) Close() error { return c.conn.Close() }
+func (c *Connection) Close() error { return c.Conn.Close() }
