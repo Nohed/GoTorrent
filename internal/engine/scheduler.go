@@ -41,6 +41,9 @@ type scheduler struct {
 	haveCount    int // Insta check the number of peices
 }
 
+// TODO: LEFT() acceses have[i] from scheduler routine, So does trackerclient routine.
+// It should probably be a atmoic and accesed safely
+
 // TODO: SEND() RETURNS A BOOL, check for each transmission
 
 // TODO: NEED TO HANDLE SEEDING

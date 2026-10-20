@@ -14,6 +14,9 @@ const torrentName = "testdata/debian-13.7.0-amd64-netinst.iso.torrent"
 3. print progress.
 4. stop on complete
 */
+
+// TODO: PRINT PROGRESS
+// betuifully with color!
 func main() {
 	man := newManager()
 	man.start("asd.torrent")
