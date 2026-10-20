@@ -11,14 +11,6 @@ import (
 
 // runPeer blocks until the peer session ends.
 func (m *Manager) runPeer(peerID [20]byte, conn *peer.Connection) {
-	// TODO: build the worker, register it under m.mu in m.workers[addr],
-	// and run it with m.ctx. Return when it exits.
-
-	// This is called from inside the workers gorotuine
-
-	// "m.workers" MAP CONTIANING WORKERS
-
-	// m.events = event channel to pass messages up to worker
 	worker := NewWorker(m.ctx, conn, m.events, len(m.torrent.PieceHashes))
 
 	m.mu.Lock()

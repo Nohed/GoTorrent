@@ -118,9 +118,8 @@ func (s *scheduler) changeChoked(m *Manager) {
 
 }
 
-// Boundend left to 0
 func (m *Manager) left() int64 {
-	left := int64(m.torrent.Length) - int64(m.downloaded.Load())
+	var left int64
 	for i := 0; i < m.scheduler.numPieces; i++ {
 		if !m.scheduler.have[i] {
 			left += int64(m.pieceIO.PieceSize(i))
