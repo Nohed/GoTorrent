@@ -14,6 +14,7 @@ type Worker struct {
 	Peer              *peer.Peer
 	OutGoingEvents    chan types.Event   //reference to managers channel
 	IncommingCommands chan types.Command //own listening channel
+	parent            context.Context
 	ctx               context.Context    // When the gorotuines should to stop
 	cancel            context.CancelFunc // send cancel
 }
@@ -25,6 +26,7 @@ func NewWorker(parent context.Context, conn *peer.Connection, events chan types.
 		Peer:              peer.NewPeer(conn, numPieces),
 		IncommingCommands: make(chan types.Command, 256),
 		OutGoingEvents:    events,
+		parent:            parent,
 		ctx:               ctx,
 		cancel:            cancel,
 	}
@@ -34,19 +36,21 @@ func NewWorker(parent context.Context, conn *peer.Connection, events chan types.
 func (w *Worker) Run() error {
 	defer w.cancel()
 
+	if err := w.emit(types.Event{Eve: types.EventPeerReady}); err != nil {
+		return err
+	}
+
 	errc := make(chan error, 2) // buffered so neither loop can leak
 	go func() { errc <- w.readLoop() }()
 	go func() { errc <- w.writeLoop() }()
 
-	if err := w.emit(types.Event{Eve: types.EventPeerReady}); err != nil {
-		return err
-	}
 	err := <-errc           // first loop to stop ends the session
 	w.cancel()              // tell the write loop to stop
 	_ = w.Peer.Conn.Close() // unblock a read stuck on the socket
 	<-errc                  // wait for the other loop
 
-	_ = w.emit(types.Event{Eve: types.EventPeerClosed, Err: err})
+	w.emitFinal(types.Event{Eve: types.EventPeerClosed, Err: err})
+
 	return err
 }
 
@@ -89,6 +93,16 @@ func (w *Worker) emit(e types.Event) error {
 	}
 }
 
+// Special case on worker close to make sure event is sent to manager
+func (w *Worker) emitFinal(e types.Event) {
+	e.SenderID = w.Peer.Conn.PeerID
+	select {
+	case w.OutGoingEvents <- e:
+	case <-w.parent.Done():
+	}
+}
+
+// TODO: SEND KEEP ALIVE MESSAGES, every idle minute?
 func (w *Worker) writeLoop() error {
 	// TODO: send a keep-alive every ~2 minutes when idle.
 	for {

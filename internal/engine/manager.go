@@ -162,6 +162,10 @@ func (m *Manager) Stop() {
 		_ = c.Close() // unblocks workers stuck on reads
 	}
 	m.wg.Wait() // Wait for routines (the workers) to exit
+	err := m.pieceIO.Close()
+	if err != nil {
+		m.log.Error("Closing file failed", "error", err)
+	}
 }
 
 // Done returns a channel that is closed when all pieces have been

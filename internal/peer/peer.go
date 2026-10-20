@@ -1,6 +1,8 @@
 package peer
 
 import (
+	"sync/atomic"
+
 	"github.com/Nohed/GoTorrent/internal/storage"
 )
 
@@ -16,27 +18,29 @@ const (
 //THIS STRUCT IS NOT SHARED BETWEEN ALL WORKERS AND IS UNIQUE FOR EACH ONE
 
 type Peer struct {
-	Conn      Connection
+	Conn      *Connection
 	NumPieces int
 
 	// Only the read loop touches these
-	PeerChoking    bool
-	PeerInterested bool
-	AmInterested   bool
-	AmChoking      bool
+	PeerChoking    atomic.Bool
+	PeerInterested atomic.Bool
+	AmInterested   atomic.Bool
+	AmChoking      atomic.Bool
 
 	Bfield *storage.Bitfield
 }
 
 // Count is number of pieces that we can fetch
-func NewPeer(conn Connection, count int) *Peer {
+func NewPeer(conn *Connection, count int) *Peer {
 	p := &Peer{
-		Conn:        conn,
-		NumPieces:   count,
-		PeerChoking: true,
-		AmChoking:   true,
-		Bfield:      storage.NewBitfield(count),
+		Conn:      conn,
+		NumPieces: count,
+		Bfield:    storage.NewBitfield(count),
 	}
+	p.PeerChoking.Store(true)
+	p.AmChoking.Store(true)
+	p.PeerInterested.Store(false)
+	p.AmInterested.Store(false)
 	return p
 }
 

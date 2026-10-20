@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/hex"
+	"math"
 	"time"
 
 	"github.com/Nohed/GoTorrent/internal/peer"
@@ -34,12 +35,25 @@ type scheduler struct {
 	peers        map[[20]byte]*peer.Peer
 	have         []bool                 // pieces we have completed
 	inProgress   map[int]*storage.Piece // pieces currently being assembled
-	availability []int                  // how many peers have each piece
-	Bitfield     []byte
+	inflight     map[[20]byte]map[blockKey]struct{}
+	availability []int // how many peers have each piece
+	Bitfield     *storage.Bitfield
+	haveCount    int // Insta check the number of peices
 }
 
 // TODO: SEND() RETURNS A BOOL, check for each transmission
+
 // TODO: NEED TO HANDLE SEEDING
+
+// TODO: Reqeusts that have been inflight for more then "requestTimeout" Should be dropped
+
+// TODO: DEADLOCK POSSIBLITY:
+// When a peer requests a block or a piece finishes, scheduler attempts to write to pieceIO.Requests:
+// When PieceIO finishes reading or writing disk blocks and attempts to send the result back to m.events
+// IF disk IO is too slow, Both channels might fill upp.
+// * Scheduler blocks and hangs on writes to pieceIO.Requests:
+// * PeiceIO blocks and hangs on writes to m.events
+// = Both routines freeze forever.
 func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 	n := len(t.PieceHashes)
 	return &scheduler{
@@ -50,7 +64,10 @@ func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 		peers:        make(map[[20]byte]*peer.Peer),
 		have:         make([]bool, n),
 		inProgress:   make(map[int]*storage.Piece),
+		inflight:     make(map[[20]byte]map[blockKey]struct{}),
 		availability: make([]int, n),
+		Bitfield:     storage.NewBitfield(n),
+		haveCount:    0,
 	}
 }
 
@@ -80,7 +97,7 @@ func (s *scheduler) changeChoked(m *Manager) {
 
 	// -- Change internal state
 	for _, p := range dec.Choke {
-		s.peers[p.Conn.PeerID].AmChoking = true
+		s.peers[p.Conn.PeerID].AmChoking.Store(true)
 		m.mu.Lock()
 		w, ok := m.workers[p.Conn.PeerID]
 		m.mu.Unlock()
@@ -90,7 +107,7 @@ func (s *scheduler) changeChoked(m *Manager) {
 	}
 
 	for _, p := range dec.Unchoke {
-		s.peers[p.Conn.PeerID].AmChoking = false
+		s.peers[p.Conn.PeerID].AmChoking.Store(false)
 		m.mu.Lock()
 		w, ok := m.workers[p.Conn.PeerID]
 		m.mu.Unlock()
@@ -104,8 +121,10 @@ func (s *scheduler) changeChoked(m *Manager) {
 // Boundend left to 0
 func (m *Manager) left() int64 {
 	left := int64(m.torrent.Length) - int64(m.downloaded.Load())
-	if left < 0 {
-		return 0
+	for i := 0; i < m.scheduler.numPieces; i++ {
+		if !m.scheduler.have[i] {
+			left += int64(m.pieceIO.PieceSize(i))
+		}
 	}
 	return left
 }
@@ -138,6 +157,8 @@ func (m *Manager) handleEvent(ev types.Event) {
 		m.onBlockUploaded(ev)
 	case types.EventDiskRead:
 		m.onDiskRead(ev)
+	case types.EventDiskWrite:
+		m.onDiskWrite(ev)
 	}
 }
 
@@ -153,18 +174,10 @@ func (m *Manager) onPeerReady(ev types.Event) {
 	m.scheduler.peers[ev.SenderID] = p
 	m.scheduler.choker.AddPeer(p)
 
-	// TODO: Keep track of this somewhere, do not build per command
-	bitfield := make([]byte, (m.scheduler.numPieces+7)/8)
-	for i, h := range m.scheduler.have {
-		if h {
-			bitfield[i/8] |= 0x80 >> (i % 8)
-		}
-	}
-
 	// Send over our bitfield to peer
 	w.Send(types.Command{
 		Cmd:  types.CommandSendBitfield,
-		Data: bitfield})
+		Data: m.scheduler.Bitfield.Bytes()})
 }
 
 func (m *Manager) onPeerClosed(ev types.Event) {
@@ -173,13 +186,14 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 		return
 	}
 
-	// Do we have any blocks inflight, if so release thenm TODO: FIX INFLIGHT?=?? DO WE NEED INFLIGHT EVEN=??
-	// DOES WORKER track inflight?
-	/*for block := range p.Inflight {
-		if currentPiece := m.scheduler.inProgress[block.Index]; currentPiece != nil {
-			currentPiece.ReleaseBlock(block.Begin)
+	if inflight, ok := m.scheduler.inflight[ev.SenderID]; ok {
+		for bk := range inflight {
+			if piece := m.scheduler.inProgress[bk.piece]; piece != nil {
+				piece.ReleaseBlock(bk.begin)
+			}
 		}
-	}*/
+		delete(m.scheduler.inflight, ev.SenderID)
+	}
 
 	for i := 0; i < m.scheduler.numPieces; i++ {
 		if p.Bfield.Has(i) {
@@ -192,34 +206,39 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 
 func (m *Manager) onPeerInterested(ev types.Event) {
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
-		p.PeerInterested = true
+		p.PeerInterested.Store(true)
 	}
 }
 
 func (m *Manager) onPeerNotInterested(ev types.Event) {
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
-		p.PeerInterested = false
+		p.PeerInterested.Store(false)
 	}
 }
 
 func (m *Manager) onPeerChoked(ev types.Event) {
+	// Set state
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
-		p.PeerChoking = true
+		p.PeerChoking.Store(true)
+
+		// Relase in flight blocks requested from this peer
+		if inflight, ok := m.scheduler.inflight[ev.SenderID]; ok {
+			for bk := range inflight {
+				if piece := m.scheduler.inProgress[bk.piece]; piece != nil {
+					piece.ReleaseBlock(bk.begin)
+				}
+			}
+			clear(inflight)
+		}
 	}
+
 }
 
 func (m *Manager) onPeerUnchoked(ev types.Event) {
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
-		p.PeerChoking = false
+		p.PeerChoking.Store(false)
+		m.requestBlocks(ev.SenderID)
 	}
-
-	// TODO:
-
-	w := m.getWorkerForEvent(ev)
-	if w != nil {
-
-	}
-	// REQUEST PIOEICED HERE as we are yunchoked
 }
 
 func (m *Manager) onBitfield(ev types.Event) {
@@ -259,9 +278,8 @@ func (m *Manager) onHave(ev types.Event) {
 	}
 	m.calcInterested(p.Conn.PeerID)
 
-	if !p.PeerChoking && p.AmInterested {
-		// TODO: SEND PIECE TO requestor
-
+	if !p.PeerChoking.Load() && p.AmInterested.Load() {
+		m.requestBlocks(ev.SenderID)
 	}
 }
 
@@ -270,6 +288,12 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 	p, ok := m.getPeerForEvent(ev)
 	if !ok {
 		return // peer already closed, doesnt exist or something
+	}
+
+	// Free the inflight spot as we have received the block
+	key := blockKey{piece: ev.PieceIndex, begin: ev.Begin}
+	if inflight, ok := m.scheduler.inflight[ev.SenderID]; ok {
+		delete(inflight, key)
 	}
 
 	m.scheduler.choker.IncrementDownload(p, len(ev.Data))
@@ -299,10 +323,10 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 			Begin:      ev.Begin, Length: ev.Length,
 			Piece: piece}
 	}
-	// REMOVE FROM INPROGRESS
-	//delete(m.scheduler.inProgress, ev.PieceIndex)
 
-	//m.broadcastHave(index) //Do this now or when we finish writing??? TODO:
+	// Slot freed up, we can request next block from this peer
+	m.requestBlocks(ev.SenderID)
+
 }
 
 func (m *Manager) onBlockRequested(ev types.Event) {
@@ -321,7 +345,7 @@ func (m *Manager) onBlockRequested(ev types.Event) {
 		return
 	}
 
-	if p.AmChoking || !p.PeerInterested || !m.scheduler.have[ev.PieceIndex] { //dont send, we may have choked while message is in transit or something esle
+	if p.AmChoking.Load() || !p.PeerInterested.Load() || !m.scheduler.have[ev.PieceIndex] { //dont send, we may have choked while message is in transit or something esle
 		return
 	}
 
@@ -344,7 +368,7 @@ func (m *Manager) onDiskRead(ev types.Event) {
 	if !ok {
 		return // peer closed while we were reading
 	}
-	if p.AmChoking {
+	if p.AmChoking.Load() {
 		return // we choked them meanwhile, so don't upload
 	}
 
@@ -358,34 +382,60 @@ func (m *Manager) onDiskRead(ev types.Event) {
 		PieceIndex: ev.PieceIndex,
 		Begin:      ev.Begin,
 		Data:       ev.Data}) {
-		m.events <- ev //requeue if for some reason we cant send, Maybe change later
+		// Do not requeue, a full event channel will block the scheduler
+		// Drop this peer as its progress has stopped = prevents deadlock
+		m.log.Debug("worker queue full, dropping peer", "peer", hex.EncodeToString(ev.SenderID[:]))
+		w.Stop()
+		return
 	}
 }
 
 func (m *Manager) onDiskWrite(ev types.Event) {
 
+	// safety check
+	if ev.PieceIndex < 0 || ev.PieceIndex >= m.scheduler.numPieces {
+		m.log.Warn("onDiskWrite: piece index out of bounds", "piece", ev.PieceIndex)
+		return
+	}
+
 	piece := m.scheduler.inProgress[ev.PieceIndex]
 
 	if ev.Err != nil {
-		err := storage.VerifyPiece(piece)
-		if err != nil { //Piece is not correct, scrap it
-			delete(m.scheduler.inProgress, ev.PieceIndex)
+		m.log.Warn("piece disk write failed",
+			"piece", ev.PieceIndex,
+			"err", ev.Err,
+		)
 
-		} else { //piece is not incorrect, write jsut failed, retry??
-			req := storage.DiskRequest{
-				Kind:       storage.DiskWrite,
-				SenderID:   ev.SenderID,
-				PieceIndex: ev.PieceIndex,
-				Begin:      ev.Begin,
-				Length:     ev.Length,
-				Piece:      piece,
-			}
-			m.scheduler.pieceIO.Requests <- req
-		}
-	} else { //Writing was successfull, notify peers and update bitfield
-		m.scheduler.have[ev.PieceIndex] = true
+		// If verification or writing failed, discard the piece so it can be re-downloaded
 		delete(m.scheduler.inProgress, ev.PieceIndex)
-		m.broadcastHave(ev.PieceIndex)
+		if piece != nil {
+			piece.Reset()
+		}
+		return
+	}
+	// ---- Writing succeded
+
+	if !m.scheduler.have[ev.PieceIndex] {
+		m.scheduler.have[ev.PieceIndex] = true
+		m.scheduler.Bitfield.SetPiece(ev.PieceIndex)
+		m.scheduler.haveCount++
+	}
+	// Remove from active assembly & broadcast to swarm
+	delete(m.scheduler.inProgress, ev.PieceIndex)
+	m.broadcastHave(ev.PieceIndex)
+
+	// Are we finnished?
+	if m.scheduler.haveCount == m.scheduler.numPieces {
+		m.doneOnce.Do(func() {
+			close(m.done)
+			m.scheduler.choker.SetSeeding(true)
+			m.log.Info("Torrent download complete!")
+		})
+	}
+
+	// Recalc Interested
+	for peerID := range m.scheduler.peers {
+		m.calcInterested(peerID)
 	}
 
 }
@@ -428,11 +478,11 @@ func (m *Manager) calcInterested(peerID [20]byte) {
 		return
 	}
 
-	if want && !p.AmInterested {
-		p.AmInterested = true
+	if want && !p.AmInterested.Load() {
+		p.AmInterested.Store(true)
 		w.Send(types.Command{Cmd: types.CommandInterested})
-	} else if !want && p.AmInterested {
-		p.AmInterested = false
+	} else if !want && p.AmInterested.Load() {
+		p.AmInterested.Store(false)
 		w.Send(types.Command{Cmd: types.CommandNotInterested})
 	}
 }
@@ -452,12 +502,114 @@ func (m *Manager) getWorkerForEvent(ev types.Event) *Worker {
 }
 
 func (m *Manager) broadcastHave(pieceIndex int) {
+	// Snapshot workers
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	workers := make([]*Worker, 0, len(m.workers))
 	for _, w := range m.workers {
-		w.IncommingCommands <- types.Command{
-			Cmd:        types.CommandHave,
-			PieceIndex: pieceIndex,
+		workers = append(workers, w)
+	}
+	m.mu.Unlock()
+
+	cmd := types.Command{
+		Cmd:        types.CommandHave,
+		PieceIndex: pieceIndex,
+	}
+
+	// Send outside lock, fails on filled channel buffers
+	for _, w := range workers {
+		if !w.Send(cmd) {
+			m.log.Warn("dropping have message: worker command buffer full",
+				"peer", hex.EncodeToString(w.Peer.Conn.PeerID[:]),
+				"piece", pieceIndex,
+			)
 		}
 	}
+}
+
+func (m *Manager) requestBlocks(peerID [20]byte) {
+	p := m.scheduler.peers[peerID]
+	if p == nil || p.PeerChoking.Load() {
+		return // Peer is not connected or is choking us
+	}
+
+	w := m.getWorkerForEvent(types.Event{SenderID: peerID})
+	if w == nil {
+		return
+	}
+
+	if m.scheduler.inflight[peerID] == nil {
+		m.scheduler.inflight[peerID] = make(map[blockKey]struct{})
+	}
+
+	peerInflight := m.scheduler.inflight[peerID]
+
+	// Fill the pipeline up to maxInflightPerPeer (8)
+	for len(peerInflight) < maxInflightPerPeer {
+		pieceIndex, begin, length, ok := m.chooseNextBlock(p)
+		if !ok {
+			break // No blocks available that this peer can supply
+		}
+
+		key := blockKey{piece: pieceIndex, begin: begin}
+		peerInflight[key] = struct{}{}
+
+		// Send request command to the worker
+		sent := w.Send(types.Command{
+			Cmd:        types.CommandRequestBlock,
+			PieceIndex: pieceIndex,
+			Begin:      begin,
+			Length:     length,
+		})
+
+		if !sent {
+			// If sending failed, release the claimed block
+			delete(peerInflight, key)
+			if piece := m.scheduler.inProgress[pieceIndex]; piece != nil {
+				piece.ReleaseBlock(begin)
+			}
+			break
+		}
+	}
+}
+
+func (m *Manager) chooseNextBlock(p *peer.Peer) (pieceIndex, begin, length int, ok bool) {
+	s := m.scheduler
+
+	// Prioritize finishing in-progress pieces
+	for i, piece := range s.inProgress {
+		if p.Bfield.Has(i) {
+			if offset, blen, found := piece.NextUnrequested(); found {
+				return i, offset, blen, true
+			}
+		}
+	}
+
+	// Check new peice can be started
+	if len(s.inProgress) >= maxInProgress {
+		return 0, 0, 0, false
+	}
+
+	// Pick the rarest piece that this peer has and we don't have
+	bestPiece := -1
+	bestAvailability := math.MaxInt
+	for i := 0; i < s.numPieces; i++ {
+		if !s.have[i] && s.inProgress[i] == nil && p.Bfield.Has(i) {
+			avail := s.availability[i]
+			if avail < bestAvailability {
+				bestAvailability = avail
+				bestPiece = i
+			}
+		}
+	}
+
+	if bestPiece == -1 {
+		return 0, 0, 0, false // Peer has no pieces we need
+	}
+
+	// Create new in-progress piece
+	pieceLength := m.pieceIO.PieceSize(bestPiece)
+	newPiece := storage.NewPiece(bestPiece, pieceLength, m.torrent.PieceHashes[bestPiece])
+	s.inProgress[bestPiece] = newPiece
+	offset, blen, _ := newPiece.NextUnrequested()
+	return bestPiece, offset, blen, true
 }

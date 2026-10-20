@@ -92,7 +92,7 @@ func (c *Choker) RecalculateChoking() *Decision {
 func (c *Choker) interestedPeers() []*peer.Peer {
 	candidates := make([]*peer.Peer, 0, len(c.peers))
 	for p := range c.peers {
-		if p.PeerInterested {
+		if p.PeerInterested.Load() {
 			candidates = append(candidates, p)
 		}
 	}
@@ -147,7 +147,7 @@ func (c *Choker) optimisticStillValid(selected map[*peer.Peer]bool) bool {
 	if _, ok := c.peers[c.optimistic]; !ok {
 		return false
 	}
-	return c.optimistic.PeerInterested && !selected[c.optimistic]
+	return c.optimistic.PeerInterested.Load() && !selected[c.optimistic]
 }
 
 func (c *Choker) pickOptimistic(candidates []*peer.Peer, selected map[*peer.Peer]bool) *peer.Peer {
@@ -160,7 +160,7 @@ func (c *Choker) pickOptimistic(candidates []*peer.Peer, selected map[*peer.Peer
 
 		any = append(any, p)
 
-		if p.AmChoking {
+		if p.AmChoking.Load() {
 			choked = append(choked, p)
 		}
 	}
@@ -183,15 +183,15 @@ func (c *Choker) diffAgainstCurrent(selected map[*peer.Peer]bool) *Decision {
 	d := &Decision{}
 
 	for p := range c.peers {
-		choking := p.AmChoking
+		choking := p.AmChoking.Load()
 
 		switch {
 		case selected[p] && choking:
-			p.AmChoking = false
+			p.AmChoking.Store(false)
 			d.Unchoke = append(d.Unchoke, p)
 
 		case !selected[p] && !choking:
-			p.AmChoking = true
+			p.AmChoking.Store(true)
 			d.Choke = append(d.Choke, p)
 		}
 	}

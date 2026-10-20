@@ -30,9 +30,6 @@ func (m *Manager) runPeer(peerID [20]byte, conn *peer.Connection) {
 	m.mu.Unlock()
 
 	worker.Run()
-	select {
-	case <-m.ctx.Done():
-	}
 }
 
 // removePeer frees the slot and lets the address be dialed again on a later announce.
