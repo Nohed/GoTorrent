@@ -296,9 +296,6 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 		delete(inflight, key)
 	}
 
-	m.scheduler.choker.IncrementDownload(p, len(ev.Data))
-	m.downloaded.Add(uint64(len(ev.Data)))
-
 	piece := m.scheduler.inProgress[ev.PieceIndex]
 	if piece == nil {
 		return // piece finished or was abandoned while this block was in flight
@@ -314,6 +311,10 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 		piece.ReleaseBlock(ev.Begin) // let another peer fetch it
 		return
 	}
+
+	// increment only accepted dat
+	m.scheduler.choker.IncrementDownload(p, len(ev.Data))
+	m.downloaded.Add(uint64(len(ev.Data)))
 
 	if piece.Complete() {
 		//dont take away inProgress yet! Wait until we get confirmation from IO that it actually went to disk and remove it on confirmation
