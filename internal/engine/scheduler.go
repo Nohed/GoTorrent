@@ -35,7 +35,7 @@ type scheduler struct {
 	peers        map[[20]byte]*peer.Peer
 	have         []bool                 // pieces we have completed
 	inProgress   map[int]*storage.Piece // pieces currently being assembled
-	inflight     map[[20]byte]map[blockKey]struct{}
+	inflight     map[[20]byte]map[blockKey]time.Time
 	availability []int // how many peers have each piece
 	Bitfield     *storage.Bitfield
 	haveCount    int // Insta check the number of peices
@@ -44,8 +44,6 @@ type scheduler struct {
 // TODO: SEND() RETURNS A BOOL, check for each transmission
 
 // TODO: NEED TO HANDLE SEEDING
-
-// TODO: Reqeusts that have been inflight for more then "requestTimeout" Should be dropped
 
 // TODO: DEADLOCK POSSIBLITY:
 // When a peer requests a block or a piece finishes, scheduler attempts to write to pieceIO.Requests:
@@ -64,7 +62,7 @@ func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 		peers:        make(map[[20]byte]*peer.Peer),
 		have:         make([]bool, n),
 		inProgress:   make(map[int]*storage.Piece),
-		inflight:     make(map[[20]byte]map[blockKey]struct{}),
+		inflight:     make(map[[20]byte]map[blockKey]time.Time),
 		availability: make([]int, n),
 		Bitfield:     storage.NewBitfield(n),
 		haveCount:    0,
@@ -74,6 +72,9 @@ func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 func (m *Manager) runScheduler() {
 	rechokeTicker := time.NewTicker(10 * time.Second)
 	defer rechokeTicker.Stop()
+
+	timeoutTicker := time.NewTicker(2 * time.Second)
+	defer timeoutTicker.Stop()
 
 	for {
 		select {
@@ -86,6 +87,9 @@ func (m *Manager) runScheduler() {
 		case <-rechokeTicker.C:
 			m.scheduler.changeChoked(m) // Keeps track of optimistic vs regular choking itself
 
+		case now := <-timeoutTicker.C:
+			m.checkRequestTimeouts(now)
+
 		case <-m.ctx.Done(): // cancel signal
 			return
 		}
@@ -97,7 +101,10 @@ func (s *scheduler) changeChoked(m *Manager) {
 
 	// -- Change internal state
 	for _, p := range dec.Choke {
-		s.peers[p.Conn.PeerID].AmChoking.Store(true)
+		p.AmChoking.Store(true)
+		if p.Conn == nil {
+			continue
+		}
 		m.mu.Lock()
 		w, ok := m.workers[p.Conn.PeerID]
 		m.mu.Unlock()
@@ -107,7 +114,10 @@ func (s *scheduler) changeChoked(m *Manager) {
 	}
 
 	for _, p := range dec.Unchoke {
-		s.peers[p.Conn.PeerID].AmChoking.Store(false)
+		p.AmChoking.Store(false)
+		if p.Conn == nil {
+			continue
+		}
 		m.mu.Lock()
 		w, ok := m.workers[p.Conn.PeerID]
 		m.mu.Unlock()
@@ -186,9 +196,9 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 	}
 
 	if inflight, ok := m.scheduler.inflight[ev.SenderID]; ok {
-		for bk := range inflight {
-			if piece := m.scheduler.inProgress[bk.piece]; piece != nil {
-				piece.ReleaseBlock(bk.begin)
+		for block := range inflight {
+			if piece := m.scheduler.inProgress[block.piece]; piece != nil {
+				piece.ReleaseBlock(block.begin)
 			}
 		}
 		delete(m.scheduler.inflight, ev.SenderID)
@@ -201,6 +211,7 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 	}
 	m.scheduler.choker.RemovePeer(p)
 	delete(m.scheduler.peers, ev.SenderID)
+	m.requestBlocksFromAll()
 }
 
 func (m *Manager) onPeerInterested(ev types.Event) {
@@ -222,13 +233,14 @@ func (m *Manager) onPeerChoked(ev types.Event) {
 
 		// Relase in flight blocks requested from this peer
 		if inflight, ok := m.scheduler.inflight[ev.SenderID]; ok {
-			for bk := range inflight {
-				if piece := m.scheduler.inProgress[bk.piece]; piece != nil {
-					piece.ReleaseBlock(bk.begin)
+			for block := range inflight {
+				if piece := m.scheduler.inProgress[block.piece]; piece != nil {
+					piece.ReleaseBlock(block.begin)
 				}
 			}
 			clear(inflight)
 		}
+		m.requestBlocksFromAll()
 	}
 
 }
@@ -259,6 +271,10 @@ func (m *Manager) onBitfield(ev types.Event) {
 
 	// Recalc interest and send command on change
 	m.calcInterested(p.Conn.PeerID)
+
+	if !p.PeerChoking.Load() && p.AmInterested.Load() {
+		m.requestBlocks(ev.SenderID)
+	}
 }
 
 func (m *Manager) onHave(ev types.Event) {
@@ -411,6 +427,7 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 		if piece != nil {
 			piece.Reset()
 		}
+		m.requestBlocksFromAll()
 		return
 	}
 	// ---- Writing succeded
@@ -438,6 +455,7 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 		m.calcInterested(peerID)
 	}
 
+	m.requestBlocksFromAll()
 }
 
 func (m *Manager) onBlockUploaded(ev types.Event) {
@@ -538,7 +556,7 @@ func (m *Manager) requestBlocks(peerID [20]byte) {
 	}
 
 	if m.scheduler.inflight[peerID] == nil {
-		m.scheduler.inflight[peerID] = make(map[blockKey]struct{})
+		m.scheduler.inflight[peerID] = make(map[blockKey]time.Time)
 	}
 
 	peerInflight := m.scheduler.inflight[peerID]
@@ -551,7 +569,7 @@ func (m *Manager) requestBlocks(peerID [20]byte) {
 		}
 
 		key := blockKey{piece: pieceIndex, begin: begin}
-		peerInflight[key] = struct{}{}
+		peerInflight[key] = time.Now()
 
 		// Send request command to the worker
 		sent := w.Send(types.Command{
@@ -612,4 +630,39 @@ func (m *Manager) chooseNextBlock(p *peer.Peer) (pieceIndex, begin, length int, 
 	s.inProgress[bestPiece] = newPiece
 	offset, blen, _ := newPiece.NextUnrequested()
 	return bestPiece, offset, blen, true
+}
+
+func (m *Manager) requestBlocksFromAll() {
+	for peerID, p := range m.scheduler.peers {
+		if !p.PeerChoking.Load() && p.AmInterested.Load() {
+			m.requestBlocks(peerID)
+		}
+	}
+}
+
+func (m *Manager) checkRequestTimeouts(now time.Time) {
+	timedOutAny := false
+	for peerID, inflight := range m.scheduler.inflight {
+		w := m.getWorkerForEvent(types.Event{SenderID: peerID})
+		for block, requestedAt := range inflight {
+			if now.Sub(requestedAt) >= requestTimeout {
+				delete(inflight, block)
+				if piece := m.scheduler.inProgress[block.piece]; piece != nil {
+					piece.ReleaseBlock(block.begin)
+					if w != nil {
+						w.Send(types.Command{
+							Cmd:        types.CommandCancelBlock,
+							PieceIndex: block.piece,
+							Begin:      block.begin,
+							Length:     blockSize,
+						})
+					}
+				}
+				timedOutAny = true
+			}
+		}
+	}
+	if timedOutAny {
+		m.requestBlocksFromAll()
+	}
 }
