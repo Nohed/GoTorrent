@@ -47,8 +47,6 @@ type scheduler struct {
 
 // TODO: SEND() RETURNS A BOOL, check for each transmission
 
-// TODO: NEED TO HANDLE SEEDING
-
 // TODO: DEADLOCK POSSIBLITY:
 // When a peer requests a block or a piece finishes, scheduler attempts to write to pieceIO.Requests:
 // When PieceIO finishes reading or writing disk blocks and attempts to send the result back to m.events
