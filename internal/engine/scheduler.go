@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/hex"
+	"fmt"
 	"math"
 	"time"
 
@@ -175,6 +176,7 @@ func (m *Manager) handleEvent(ev types.Event) {
 }
 
 func (m *Manager) onPeerReady(ev types.Event) {
+	fmt.Print("IN onPeerReady\n")
 	m.mu.Lock()
 	w, ok := m.workers[ev.SenderID]
 	m.mu.Unlock()
@@ -185,7 +187,6 @@ func (m *Manager) onPeerReady(ev types.Event) {
 	p := w.Peer
 	m.scheduler.peers[ev.SenderID] = p
 	m.scheduler.choker.AddPeer(p)
-
 	// Send over our bitfield to peer
 	w.Send(types.Command{
 		Cmd:  types.CommandSendBitfield,
@@ -193,6 +194,8 @@ func (m *Manager) onPeerReady(ev types.Event) {
 }
 
 func (m *Manager) onPeerClosed(ev types.Event) {
+	fmt.Print("IN onPeerClosed\n")
+
 	p, ok := m.scheduler.peers[ev.SenderID]
 	if !ok {
 		return
@@ -218,12 +221,16 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 }
 
 func (m *Manager) onPeerInterested(ev types.Event) {
+	fmt.Print("In onPeerInterested\n")
+
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerInterested.Store(true)
 	}
 }
 
 func (m *Manager) onPeerNotInterested(ev types.Event) {
+	fmt.Print("In onPeerNotInterested\n")
+
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerInterested.Store(false)
 	}
@@ -231,6 +238,8 @@ func (m *Manager) onPeerNotInterested(ev types.Event) {
 
 func (m *Manager) onPeerChoked(ev types.Event) {
 	// Set state
+	fmt.Print("In onPeerChoked\n")
+
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerChoking.Store(true)
 
@@ -249,6 +258,8 @@ func (m *Manager) onPeerChoked(ev types.Event) {
 }
 
 func (m *Manager) onPeerUnchoked(ev types.Event) {
+	fmt.Print("In onPeerUnChoked\n")
+
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerChoking.Store(false)
 		m.requestBlocks(ev.SenderID)
@@ -256,10 +267,15 @@ func (m *Manager) onPeerUnchoked(ev types.Event) {
 }
 
 func (m *Manager) onBitfield(ev types.Event) {
+	fmt.Print("In onBitfield\n")
+
 	p, ok := m.scheduler.peers[ev.SenderID]
 	if !ok {
+		m.log.Warn("calcInterested: unknown peer", "peer", hex.EncodeToString(ev.SenderID[:4]))
+
 		return
 	}
+
 	if err := p.Bfield.SetBitfield(ev.Data); err != nil {
 		m.log.Warn("Bad bitfield", "peer", hex.EncodeToString(ev.SenderID[:]), "error", err)
 		return
@@ -281,6 +297,8 @@ func (m *Manager) onBitfield(ev types.Event) {
 }
 
 func (m *Manager) onHave(ev types.Event) {
+	fmt.Print("In onHave\n")
+
 	p, ok := m.scheduler.peers[ev.SenderID]
 	if !ok {
 		return
@@ -302,6 +320,7 @@ func (m *Manager) onHave(ev types.Event) {
 }
 
 func (m *Manager) onBlockReceived(ev types.Event) {
+	fmt.Print("In onBlockReceived\n")
 
 	p, ok := m.getPeerForEvent(ev)
 	if !ok {
@@ -349,6 +368,8 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 }
 
 func (m *Manager) onBlockRequested(ev types.Event) {
+	fmt.Print("In onBlockRequested\n")
+
 	w := m.getWorkerForEvent(ev)
 
 	if w == nil {
@@ -379,6 +400,7 @@ func (m *Manager) onBlockRequested(ev types.Event) {
 }
 
 func (m *Manager) onDiskRead(ev types.Event) {
+	fmt.Print("In onDiskRead\n")
 
 	if ev.Err != nil {
 		return // already logged by runScheduler; nothing to send
@@ -410,6 +432,9 @@ func (m *Manager) onDiskRead(ev types.Event) {
 }
 
 func (m *Manager) onDiskWrite(ev types.Event) {
+	fmt.Print("In onDiskWrite\n")
+
+	fmt.Print("Written to disk Piece with index: %d \n", ev.PieceIndex)
 
 	// safety check
 	if ev.PieceIndex < 0 || ev.PieceIndex >= m.scheduler.numPieces {
@@ -420,10 +445,7 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 	piece := m.scheduler.inProgress[ev.PieceIndex]
 
 	if ev.Err != nil {
-		m.log.Warn("piece disk write failed",
-			"piece", ev.PieceIndex,
-			"err", ev.Err,
-		)
+		m.log.Warn("piece disk write failed", "piece", ev.PieceIndex, "err", ev.Err)
 
 		// If verification or writing failed, discard the piece so it can be re-downloaded
 		delete(m.scheduler.inProgress, ev.PieceIndex)
@@ -462,6 +484,8 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 }
 
 func (m *Manager) onBlockUploaded(ev types.Event) {
+	fmt.Print("In onBlockUploaded\n")
+
 	p, ok := m.getPeerForEvent(ev)
 	if !ok {
 		return
@@ -482,11 +506,15 @@ func (m *Manager) onBlockUploaded(ev types.Event) {
 }
 
 func (m *Manager) calcInterested(peerID [20]byte) {
+	fmt.Print("In calcInterested \n")
+
 	p := m.scheduler.peers[peerID]
 	want := false
 
 	for i := 0; i < m.scheduler.numPieces; i++ {
 		if !m.scheduler.have[i] && p.Bfield.Has(i) {
+			fmt.Print("We want data from peer\n")
+
 			want = true
 			break
 		}
@@ -501,6 +529,7 @@ func (m *Manager) calcInterested(peerID [20]byte) {
 
 	if want && !p.AmInterested.Load() {
 		p.AmInterested.Store(true)
+		fmt.Print("We want data, we are intersted\n")
 		w.Send(types.Command{Cmd: types.CommandInterested})
 	} else if !want && p.AmInterested.Load() {
 		p.AmInterested.Store(false)
@@ -667,5 +696,14 @@ func (m *Manager) checkRequestTimeouts(now time.Time) {
 	}
 	if timedOutAny {
 		m.requestBlocksFromAll()
+	}
+}
+
+func (s *scheduler) markHave(have []bool) {
+	for i, ok := range have {
+		if ok {
+			s.have[i] = true
+			s.Bitfield.SetPiece(i)
+		}
 	}
 }

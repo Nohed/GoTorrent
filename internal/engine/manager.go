@@ -88,13 +88,20 @@ func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnec
 		// CLoSE IO FILE?
 		return nil, fmt.Errorf("generate peer ID: %w", err)
 	}
-	io, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength, m.events)
+	pio, err := storage.NewPieceIO(path, newTorrent.Length, newTorrent.PieceLength, m.events)
 	if err != nil {
 		return nil, err
 	}
 
-	m.pieceIO = io
+	have, err := pio.VerifyExisting(newTorrent.PieceHashes) // use your real field name
+	if err != nil {
+		pio.Close()
+		return nil, fmt.Errorf("verify existing data: %w", err)
+	}
+	m.pieceIO = pio //is this used?
+
 	m.scheduler = newScheduler(newTorrent, m.pieceIO)
+	m.scheduler.markHave(have)
 
 	return m, nil
 }
@@ -111,7 +118,7 @@ func (m *Manager) Start() error {
 	}
 
 	// Accept new connections from peers
-	ln, err := net.Listen("tcp", ":"+strconv.Itoa(int(m.port)))
+	ln, err := net.Listen("tcp4", ":"+strconv.Itoa(int(m.port)))
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}

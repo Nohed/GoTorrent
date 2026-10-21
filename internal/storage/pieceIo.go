@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha1"
 	"fmt"
 	"os"
 
@@ -32,6 +33,7 @@ type PieceIO struct {
 	file        *os.File
 	totalLength int
 	pieceLength int
+	fresh       bool //file did not exist or was empty on startup
 
 	Requests chan DiskRequest
 	events   chan<- types.Event
@@ -53,6 +55,13 @@ func NewPieceIO(path string, totalLength int, pieceLength int, events chan<- typ
 		return nil, fmt.Errorf("failed to open output file: %w", err)
 	}
 
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to stat output file: %w", err)
+	}
+	fresh := info.Size() == 0
+
 	if err := file.Truncate(int64(totalLength)); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to resize output file: %w", err)
@@ -62,6 +71,7 @@ func NewPieceIO(path string, totalLength int, pieceLength int, events chan<- typ
 		file:        file,
 		totalLength: totalLength,
 		pieceLength: pieceLength,
+		fresh:       fresh,
 		Requests:    make(chan DiskRequest, 64),
 		events:      events,
 	}, nil
@@ -182,6 +192,31 @@ func (pieceIO *PieceIO) ReadBlock(pieceIndex int, begin int, length int) ([]byte
 	}
 
 	return data, nil
+}
+
+// VerifyExisting hashes every piece already on disk and reports which ones
+// match the torrent's piece hashes.
+func (pieceIO *PieceIO) VerifyExisting(hashes [][20]byte) ([]bool, error) {
+	pieces := (pieceIO.totalLength + pieceIO.pieceLength - 1) / pieceIO.pieceLength
+	if len(hashes) != pieces {
+		return nil, fmt.Errorf("got %d piece hashes, file needs %d", len(hashes), pieces)
+	}
+
+	have := make([]bool, pieces)
+	if pieceIO.fresh {
+		return have, nil // new file: nothing to hash, skips reading GBs of zeros
+	}
+
+	buf := make([]byte, pieceIO.pieceLength)
+	for i, want := range hashes {
+		size := pieceIO.PieceSize(i)
+		off := int64(i) * int64(pieceIO.pieceLength)
+		if _, err := pieceIO.file.ReadAt(buf[:size], off); err != nil {
+			return nil, fmt.Errorf("read piece %d: %w", i, err)
+		}
+		have[i] = sha1.Sum(buf[:size]) == want
+	}
+	return have, nil
 }
 
 // Close closes the underlying file.
