@@ -72,7 +72,7 @@ func NewPieceIO(path string, totalLength int, pieceLength int, events chan<- typ
 		totalLength: totalLength,
 		pieceLength: pieceLength,
 		fresh:       fresh,
-		Requests:    make(chan DiskRequest, 64),
+		Requests:    make(chan DiskRequest, 1024),
 		events:      events,
 	}, nil
 }
