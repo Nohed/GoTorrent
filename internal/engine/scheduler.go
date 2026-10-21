@@ -2,7 +2,9 @@ package engine
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"time"
 
@@ -80,9 +82,13 @@ func (m *Manager) runScheduler() {
 
 	for {
 		select {
-		case event := <-m.events: // WHat hjappends i f a client crashed?
+		case event := <-m.events:
 			if event.Err != nil {
-				m.log.Warn("peer event error", "peer", hex.EncodeToString(event.SenderID[:]), "error", event.Err)
+				if event.Eve == types.EventPeerClosed || errors.Is(event.Err, io.EOF) {
+					m.log.Debug("peer disconnected", "peer", hex.EncodeToString(event.SenderID[:]), "error", event.Err)
+				} else {
+					m.log.Warn("peer event error", "peer", hex.EncodeToString(event.SenderID[:]), "error", event.Err)
+				}
 			}
 			m.handleEvent(event)
 
@@ -138,13 +144,7 @@ func (s *scheduler) changeChoked(m *Manager) {
 }
 
 func (m *Manager) left() int64 {
-	var left int64
-	for i := 0; i < m.scheduler.numPieces; i++ {
-		if !m.scheduler.have[i] {
-			left += int64(m.pieceIO.PieceSize(i))
-		}
-	}
-	return left
+	return m.leftBytes.Load()
 }
 
 func (m *Manager) handleEvent(ev types.Event) {
@@ -181,7 +181,6 @@ func (m *Manager) handleEvent(ev types.Event) {
 }
 
 func (m *Manager) onPeerReady(ev types.Event) {
-	fmt.Print("IN onPeerReady\n")
 	m.mu.Lock()
 	w, ok := m.workers[ev.SenderID]
 	m.mu.Unlock()
@@ -200,8 +199,6 @@ func (m *Manager) onPeerReady(ev types.Event) {
 }
 
 func (m *Manager) onPeerClosed(ev types.Event) {
-	fmt.Print("IN onPeerClosed\n")
-
 	p, ok := m.scheduler.peers[ev.SenderID]
 	if !ok {
 		return
@@ -227,16 +224,12 @@ func (m *Manager) onPeerClosed(ev types.Event) {
 }
 
 func (m *Manager) onPeerInterested(ev types.Event) {
-	fmt.Print("In onPeerInterested\n")
-
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerInterested.Store(true)
 	}
 }
 
 func (m *Manager) onPeerNotInterested(ev types.Event) {
-	fmt.Print("In onPeerNotInterested\n")
-
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerInterested.Store(false)
 	}
@@ -244,8 +237,6 @@ func (m *Manager) onPeerNotInterested(ev types.Event) {
 
 func (m *Manager) onPeerChoked(ev types.Event) {
 	// Set state
-	fmt.Print("In onPeerChoked\n")
-
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerChoking.Store(true)
 
@@ -264,8 +255,6 @@ func (m *Manager) onPeerChoked(ev types.Event) {
 }
 
 func (m *Manager) onPeerUnchoked(ev types.Event) {
-	fmt.Print("In onPeerUnChoked\n")
-
 	if p, ok := m.scheduler.peers[ev.SenderID]; ok {
 		p.PeerChoking.Store(false)
 		m.requestBlocks(ev.SenderID)
@@ -273,7 +262,6 @@ func (m *Manager) onPeerUnchoked(ev types.Event) {
 }
 
 func (m *Manager) onBitfield(ev types.Event) {
-	fmt.Print("In onBitfield\n")
 
 	p, ok := m.scheduler.peers[ev.SenderID]
 	if !ok {
@@ -303,7 +291,6 @@ func (m *Manager) onBitfield(ev types.Event) {
 }
 
 func (m *Manager) onHave(ev types.Event) {
-	fmt.Print("In onHave\n")
 
 	p, ok := m.scheduler.peers[ev.SenderID]
 	if !ok {
@@ -326,7 +313,6 @@ func (m *Manager) onHave(ev types.Event) {
 }
 
 func (m *Manager) onBlockReceived(ev types.Event) {
-	fmt.Print("In onBlockReceived\n")
 
 	p, ok := m.getPeerForEvent(ev)
 	if !ok {
@@ -374,7 +360,6 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 }
 
 func (m *Manager) onBlockRequested(ev types.Event) {
-	fmt.Print("In onBlockRequested\n")
 
 	w := m.getWorkerForEvent(ev)
 
@@ -406,7 +391,6 @@ func (m *Manager) onBlockRequested(ev types.Event) {
 }
 
 func (m *Manager) onDiskRead(ev types.Event) {
-	fmt.Print("In onDiskRead\n")
 
 	if ev.Err != nil {
 		return // already logged by runScheduler; nothing to send
@@ -438,9 +422,6 @@ func (m *Manager) onDiskRead(ev types.Event) {
 }
 
 func (m *Manager) onDiskWrite(ev types.Event) {
-	fmt.Print("In onDiskWrite\n")
-
-	fmt.Print("Written to disk Piece with index: %d \n", ev.PieceIndex)
 
 	// safety check
 	if ev.PieceIndex < 0 || ev.PieceIndex >= m.scheduler.numPieces {
@@ -467,6 +448,8 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 		m.scheduler.have[ev.PieceIndex] = true
 		m.scheduler.Bitfield.SetPiece(ev.PieceIndex)
 		m.scheduler.haveCount++
+		m.havePieces.Add(1)
+		m.leftBytes.Add(-int64(m.pieceIO.PieceSize(ev.PieceIndex)))
 	}
 	// Remove from active assembly & broadcast to swarm
 	delete(m.scheduler.inProgress, ev.PieceIndex)
@@ -490,8 +473,6 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 }
 
 func (m *Manager) onBlockUploaded(ev types.Event) {
-	fmt.Print("In onBlockUploaded\n")
-
 	p, ok := m.getPeerForEvent(ev)
 	if !ok {
 		return
@@ -512,15 +493,11 @@ func (m *Manager) onBlockUploaded(ev types.Event) {
 }
 
 func (m *Manager) calcInterested(peerID [20]byte) {
-	fmt.Print("In calcInterested \n")
-
 	p := m.scheduler.peers[peerID]
 	want := false
 
 	for i := 0; i < m.scheduler.numPieces; i++ {
 		if !m.scheduler.have[i] && p.Bfield.Has(i) {
-			fmt.Print("We want data from peer\n")
-
 			want = true
 			break
 		}
@@ -716,13 +693,26 @@ func (m *Manager) checkRequestTimeouts(now time.Time) {
 }
 
 func (m *Manager) markHave(have []bool) {
+	var count int32
+	var left int64
 	for i, ok := range have {
 		if ok {
 			m.scheduler.have[i] = true
 			m.scheduler.Bitfield.SetPiece(i)
+			m.scheduler.haveCount++
+			count++
+		} else {
+			left += int64(m.pieceIO.PieceSize(i))
 		}
 	}
-	if m.left() == 0 {
-		m.scheduler.choker.SetSeeding(true) //we have the whole file, focus on sending
+	m.havePieces.Store(count)
+	m.leftBytes.Store(left)
+
+	if m.scheduler.haveCount == m.scheduler.numPieces {
+		m.doneOnce.Do(func() {
+			close(m.done)
+			m.scheduler.choker.SetSeeding(true) // we have the whole file, focus on sending
+			m.log.Info("Torrent download complete!")
+		})
 	}
 }

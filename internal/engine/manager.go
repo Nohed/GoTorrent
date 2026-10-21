@@ -52,7 +52,9 @@ type Manager struct {
 	cancel context.CancelFunc // send cancel
 	wg     sync.WaitGroup     // Wait until routines are finnished
 
-	downloaded, uploaded atomic.Uint64 // Curernt staet
+	downloaded, uploaded atomic.Uint64 // Current state
+	havePieces           atomic.Int32
+	leftBytes            atomic.Int64
 
 	started, stopped bool
 }
@@ -187,4 +189,56 @@ func (m *Manager) Wait() {
 	case <-m.done:
 	case <-m.ctx.Done():
 	}
+}
+
+// Stats represents a snapshot of the manager's live transfer and swarm statistics.
+type Stats struct {
+	Downloaded  uint64 // Payload bytes downloaded from peers
+	Uploaded    uint64 // Payload bytes uploaded to peers
+	TotalLength int64  // Total length of the torrent file in bytes
+	Left        int64  // Remaining bytes to download
+	HavePieces  int    // Number of verified completed pieces
+	TotalPieces int    // Total number of pieces in the torrent
+	ActivePeers int    // Currently connected peers
+	Done        bool   // Whether all pieces have been downloaded and verified
+}
+
+// Stats returns a thread-safe snapshot of download progress, speeds, and connected peers.
+func (m *Manager) Stats() Stats {
+	m.mu.Lock()
+	peers := len(m.connections)
+	m.mu.Unlock()
+
+	isDone := false
+	select {
+	case <-m.done:
+		isDone = true
+	default:
+	}
+
+	totalPieces := 0
+	if m.torrent != nil {
+		totalPieces = len(m.torrent.PieceHashes)
+	}
+
+	totalLen := int64(0)
+	if m.torrent != nil {
+		totalLen = int64(m.torrent.Length)
+	}
+
+	return Stats{
+		Downloaded:  m.downloaded.Load(),
+		Uploaded:    m.uploaded.Load(),
+		TotalLength: totalLen,
+		Left:        m.leftBytes.Load(),
+		HavePieces:  int(m.havePieces.Load()),
+		TotalPieces: totalPieces,
+		ActivePeers: peers,
+		Done:        isDone,
+	}
+}
+
+// Torrent returns the parsed metadata of the torrent.
+func (m *Manager) Torrent() *torrent.Torrent {
+	return m.torrent
 }
