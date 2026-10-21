@@ -111,7 +111,11 @@ func (s *scheduler) changeChoked(m *Manager) {
 		w, ok := m.workers[p.Conn.PeerID]
 		m.mu.Unlock()
 		if ok {
-			w.Send(types.Command{Cmd: types.CommandChoke})
+			if !w.Send(types.Command{Cmd: types.CommandChoke}) {
+				m.log.Warn("dropping choke message: worker command buffer full\n") //DROP? WAIT? WHAT??
+
+			}
+
 		}
 	}
 
@@ -124,7 +128,10 @@ func (s *scheduler) changeChoked(m *Manager) {
 		w, ok := m.workers[p.Conn.PeerID]
 		m.mu.Unlock()
 		if ok {
-			w.Send(types.Command{Cmd: types.CommandUnchoke})
+			if !w.Send(types.Command{Cmd: types.CommandUnchoke}) {
+				m.log.Warn("dropping unchoke message: worker command buffer full\n") //DROP? WAIT? WHAT??
+			}
+
 		}
 	}
 
@@ -186,9 +193,10 @@ func (m *Manager) onPeerReady(ev types.Event) {
 	m.scheduler.peers[ev.SenderID] = p
 	m.scheduler.choker.AddPeer(p)
 	// Send over our bitfield to peer
-	w.Send(types.Command{
-		Cmd:  types.CommandSendBitfield,
-		Data: m.scheduler.Bitfield.Bytes()})
+	if !w.Send(types.Command{Cmd: types.CommandSendBitfield, Data: m.scheduler.Bitfield.Bytes()}) {
+		m.log.Warn("dropping SendBitfield message: worker command buffer full\n") //DROP? WAIT? WHAT??
+
+	}
 }
 
 func (m *Manager) onPeerClosed(ev types.Event) {
@@ -528,10 +536,16 @@ func (m *Manager) calcInterested(peerID [20]byte) {
 	if want && !p.AmInterested.Load() {
 		p.AmInterested.Store(true)
 		fmt.Print("We want data, we are intersted\n")
-		w.Send(types.Command{Cmd: types.CommandInterested})
+		if !w.Send(types.Command{Cmd: types.CommandInterested}) {
+			m.log.Warn("dropping intersted message: worker command buffer full\n") //DROP? WAIT? WHAT??
+
+		}
 	} else if !want && p.AmInterested.Load() {
 		p.AmInterested.Store(false)
-		w.Send(types.Command{Cmd: types.CommandNotInterested})
+		if !w.Send(types.Command{Cmd: types.CommandNotInterested}) {
+			m.log.Warn("dropping uninterested message: worker command buffer full\n") //DROP? WAIT? WHAT??
+
+		}
 	}
 }
 
@@ -610,6 +624,7 @@ func (m *Manager) requestBlocks(peerID [20]byte) {
 		})
 
 		if !sent {
+			m.log.Warn("dropping unchoke message: worker command buffer full\n") //DROP? WAIT? WHAT??
 			// If sending failed, release the claimed block
 			delete(peerInflight, key)
 			if piece := m.scheduler.inProgress[pieceIndex]; piece != nil {
@@ -680,12 +695,15 @@ func (m *Manager) checkRequestTimeouts(now time.Time) {
 				if piece := m.scheduler.inProgress[block.piece]; piece != nil {
 					piece.ReleaseBlock(block.begin)
 					if w != nil {
-						w.Send(types.Command{
+						if !w.Send(types.Command{
 							Cmd:        types.CommandCancelBlock,
 							PieceIndex: block.piece,
 							Begin:      block.begin,
 							Length:     blockSize,
-						})
+						}) {
+							m.log.Warn("dropping cancel message: worker command buffer full\n") //DROP? WAIT? WHAT??
+
+						}
 					}
 				}
 				timedOutAny = true
