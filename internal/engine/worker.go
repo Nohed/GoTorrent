@@ -24,7 +24,7 @@ func NewWorker(parent context.Context, conn *peer.Connection, events chan types.
 	ctx, cancel := context.WithCancel(parent)
 	return &Worker{
 		Peer:              peer.NewPeer(conn, numPieces),
-		IncommingCommands: make(chan types.Command, 256),
+		IncommingCommands: make(chan types.Command, 500),
 		OutGoingEvents:    events,
 		parent:            parent,
 		ctx:               ctx,

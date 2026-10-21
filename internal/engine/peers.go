@@ -19,8 +19,6 @@ func (m *Manager) runPeer(peerID [20]byte, conn *peer.Connection) {
 		return
 	}
 	m.workers[peerID] = worker
-	m.scheduler.peers[peerID] = worker.Peer
-	m.scheduler.choker.AddPeer(worker.Peer)
 	m.mu.Unlock()
 
 	worker.Run()

@@ -3,7 +3,6 @@ package engine
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"time"
@@ -17,8 +16,8 @@ import (
 const (
 	blockSize          = 16 * 1024
 	maxRequestLen      = 32 * 1024 // largest block a peer may ask us for
-	maxInflightPerPeer = 8         // outstanding block requests per peer
-	maxInProgress      = 16        // pieces being assembled at once
+	maxInflightPerPeer = 128       // outstanding block requests per peer
+	maxInProgress      = 64        // pieces being assembled at once
 	maxQueuedReads     = 16        // upload requests waiting on a disk read, per peer
 	requestTimeout     = 30 * time.Second
 )
@@ -512,7 +511,7 @@ func (m *Manager) calcInterested(peerID [20]byte) {
 
 	if want && !p.AmInterested.Load() {
 		p.AmInterested.Store(true)
-		fmt.Print("We want data, we are intersted\n")
+		m.log.Info("We want data, we are intersted\n")
 		if !w.Send(types.Command{Cmd: types.CommandInterested}) {
 			m.log.Warn("dropping intersted message: worker command buffer full\n") //DROP? WAIT? WHAT??
 
