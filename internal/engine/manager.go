@@ -101,7 +101,7 @@ func NewManager(path string, newTorrent *torrent.Torrent, port uint16, maxConnec
 	m.pieceIO = pio //is this used?
 
 	m.scheduler = newScheduler(newTorrent, m.pieceIO)
-	m.scheduler.markHave(have)
+	m.markHave(have)
 
 	return m, nil
 }

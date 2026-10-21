@@ -697,11 +697,14 @@ func (m *Manager) checkRequestTimeouts(now time.Time) {
 	}
 }
 
-func (s *scheduler) markHave(have []bool) {
+func (m *Manager) markHave(have []bool) {
 	for i, ok := range have {
 		if ok {
-			s.have[i] = true
-			s.Bitfield.SetPiece(i)
+			m.scheduler.have[i] = true
+			m.scheduler.Bitfield.SetPiece(i)
 		}
+	}
+	if m.left() == 0 {
+		m.scheduler.choker.SetSeeding(true) //we have the whole file, focus on sending
 	}
 }
