@@ -9,7 +9,6 @@ import (
 	"github.com/Nohed/GoTorrent/internal/types"
 )
 
-// TODO: should add tracking ( bad data, not sending and so on)
 type Worker struct {
 	Peer              *peer.Peer
 	OutGoingEvents    chan types.Event   //reference to managers channel
@@ -102,21 +101,35 @@ func (w *Worker) emitFinal(e types.Event) {
 	}
 }
 
-// TODO: SEND KEEP ALIVE MESSAGES, every idle minute?
 func (w *Worker) writeLoop() error {
-	// TODO: send a keep-alive every ~2 minutes when idle.
+	keepAliveInterval := 120 * time.Second //send after two minutes of nothign
+	keepAlive := time.NewTimer(keepAliveInterval)
+	defer keepAlive.Stop()
+
 	for {
 		select {
 		case cmd := <-w.IncommingCommands:
 			if err := w.execute(cmd); err != nil {
 				return err
 			}
+			keepAlive.Reset(keepAliveInterval)
+
+		case <-keepAlive.C: //we havent sent in a while, send keep alive so that peer knows we still alive
+			if err := w.sendKeepAlive(); err != nil {
+				return err
+			}
+			keepAlive.Reset(keepAliveInterval)
+
 		case <-w.ctx.Done():
 			return nil
 		}
 	}
 }
 
+func (w *Worker) sendKeepAlive() error {
+	_, err := w.Peer.Conn.Conn.Write([]byte{0, 0, 0, 0}) //Lenght prefix is 4 bytes, keep alive is length 0
+	return err
+}
 func (w *Worker) Stop() {
 	w.cancel()
 	_ = w.Peer.Conn.Close()

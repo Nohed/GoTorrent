@@ -43,10 +43,7 @@ type scheduler struct {
 	haveCount    int // Insta check the number of peices
 }
 
-// TODO: LEFT() acceses have[i] from scheduler routine, So does trackerclient routine.
 // It should probably be a atmoic and accesed safely
-
-// TODO: SEND() RETURNS A BOOL, check for each transmission
 
 // TODO: DEADLOCK POSSIBLITY:
 // When a peer requests a block or a piece finishes, scheduler attempts to write to pieceIO.Requests:

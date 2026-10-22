@@ -35,7 +35,6 @@ FROM BEP23
 	compact = 0, we want old
 */
 
-// TODO: There is a optional key "event" for startedf, completed, stopped. include in announce
 import (
 	"encoding/binary"
 	"encoding/hex"
@@ -159,8 +158,6 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 	}
 	s.expire(swarm, now)
 
-	// TODO: Optional Event
-
 	// Check swarm size
 	_, known := swarm[peerID]
 	if !known && len(swarm) >= MaxPeersPerSwarm {
@@ -174,7 +171,7 @@ func (s *Server) handleAnnounce(w http.ResponseWriter, r *http.Request) {
 			hex.EncodeToString(peerID[:4]), "Swarm size", len(swarm))
 	}
 
-	// TODO: OPTIMIZE
+	// TODO: OPTIMIZE (maybe)
 	peersToReturn := make([]*peerEntry, 0, len(swarm))
 	for id, peer := range swarm {
 		if id != peerID { // don't send the client its own address
