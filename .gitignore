@@ -34,7 +34,10 @@ go.work.sum
 
 # env file
 .env
-
+#iso files
+testdata/*.iso
+testdata/seed/*.iso
+testdata/leech/*.iso
 # macOS
 .DS_Store
 ._*
