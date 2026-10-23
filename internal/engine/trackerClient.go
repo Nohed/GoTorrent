@@ -29,6 +29,7 @@ func (m *Manager) runTracker() {
 			}
 			continue
 		}
+		m.log.Info("Received{", len(response.Peers), "}peers from tracker")
 
 		for _, p := range response.Peers {
 			if m.ctx.Err() != nil {
