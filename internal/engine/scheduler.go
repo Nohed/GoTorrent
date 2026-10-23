@@ -508,7 +508,6 @@ func (m *Manager) calcInterested(peerID [20]byte) {
 
 	if want && !p.AmInterested.Load() {
 		p.AmInterested.Store(true)
-		m.log.Info("We want data, we are intersted\n")
 		if !w.Send(types.Command{Cmd: types.CommandInterested}) {
 			m.log.Warn("dropping intersted message: worker command buffer full\n") //DROP? WAIT? WHAT??
 
