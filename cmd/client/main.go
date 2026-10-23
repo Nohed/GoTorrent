@@ -314,20 +314,20 @@ func formatDuration(d time.Duration) string {
 		return "--"
 	}
 	if d == 0 {
-		return "0s"
+		return "0.00s"
 	}
-	d = d.Round(time.Second)
+	d = d.Round(10 * time.Millisecond) // avrunda till 2 decimaler
 	h := d / time.Hour
 	d -= h * time.Hour
 	m := d / time.Minute
 	d -= m * time.Minute
-	s := d / time.Second
+	s := d.Seconds()
 
 	if h > 0 {
-		return fmt.Sprintf("%dh%02dm", h, m)
+		return fmt.Sprintf("%dh%02dm%05.2fs", h, m, s)
 	}
 	if m > 0 {
-		return fmt.Sprintf("%dm%02ds", m, s)
+		return fmt.Sprintf("%dm%05.2fs", m, s)
 	}
-	return fmt.Sprintf("%ds", s)
+	return fmt.Sprintf("%.2fs", s)
 }
