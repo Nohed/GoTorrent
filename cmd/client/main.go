@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
@@ -35,15 +34,14 @@ const (
 
 func main() {
 	var (
-		torrentPath  = flag.String("torrent", "", "path to the .torrent file (required)")
-		outPath      = flag.String("out", "", "output file path (default: file name from torrent)")
-		port         = flag.Uint("port", 6881, "listening port (0 = random)")
-		maxPeers     = flag.Int("peers", 50, "max peer connections")
-		interval     = flag.Duration("interval", 500*time.Millisecond, "stats refresh interval")
-		seed         = flag.Bool("seed", true, "keep running and seed after download completes")
-		debug        = flag.Bool("d", false, "enable debug logging")
-		verbose      = flag.Bool("v", false, "enable verbose logging")
-		pprofEnabled = flag.Bool("pprof", false, "enable pprof HTTP server on localhost:6060")
+		torrentPath = flag.String("torrent", "", "path to the .torrent file (required)")
+		outPath     = flag.String("out", "", "output file path (default: file name from torrent)")
+		port        = flag.Uint("port", 6881, "listening port (0 = random)")
+		maxPeers    = flag.Int("peers", 50, "max peer connections")
+		interval    = flag.Duration("interval", 500*time.Millisecond, "stats refresh interval")
+		seed        = flag.Bool("seed", true, "keep running and seed after download completes")
+		debug       = flag.Bool("d", false, "enable debug logging")
+		verbose     = flag.Bool("v", false, "enable verbose logging")
 	)
 	flag.Parse()
 
@@ -62,16 +60,6 @@ func main() {
 		logHandler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})
 	}
 	logger := slog.New(logHandler)
-
-	if *pprofEnabled {
-		const pprofAddr = "localhost:6060"
-		go func() {
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil && err != http.ErrServerClosed {
-				logger.Error("pprof server error", "err", err)
-			}
-		}()
-		fmt.Printf("%s[PPROF]%s Profiler active at http://%s/debug/pprof/\n\n", boldCyan, reset, pprofAddr)
-	}
 
 	t, err := torrent.ParseFile(*torrentPath)
 	if err != nil {
