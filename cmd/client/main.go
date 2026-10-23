@@ -38,7 +38,6 @@ func main() {
 		outPath     = flag.String("out", "", "output file path (default: file name from torrent)")
 		port        = flag.Uint("port", 6881, "listening port (0 = random)")
 		maxPeers    = flag.Int("peers", 50, "max peer connections")
-		interval    = flag.Duration("interval", 500*time.Millisecond, "stats refresh interval")
 		seed        = flag.Bool("seed", true, "keep running and seed after download completes")
 		debug       = flag.Bool("d", false, "enable debug logging")
 		verbose     = flag.Bool("v", false, "enable verbose logging")
@@ -46,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	if *torrentPath == "" {
-		fmt.Fprintf(os.Stderr, "%sUsage:%s gotorrent -torrent <file.torrent> [-out <output_path>] [-port <port>] [-peers <max_peers>] [-interval 500ms] [-seed] [-pprof] [-v]\n", bold, reset)
+		fmt.Fprintf(os.Stderr, "%sUsage:%s gotorrent -torrent <file.torrent> [-out <output_path>] [-port <port>] [-peers <max_peers>] [-seed] [-v]\n", bold, reset)
 		os.Exit(2)
 	}
 
@@ -106,7 +105,7 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	ticker := time.NewTicker(*interval)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	startTime := time.Now()
