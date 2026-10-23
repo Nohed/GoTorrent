@@ -5,7 +5,7 @@ set -e
 go build -o client ./cmd/client
 
 exec ./client \
-    -torrent ".testdata/bigfile.torrent" \
+    -torrent ".testdata/online.torrent" \
     -out ".testdata/seed/ubuntu.iso" \
     -port 6881 \
     -peers 50 \
