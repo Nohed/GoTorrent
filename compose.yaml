@@ -1,0 +1,59 @@
+services:
+  tracker:
+    build:
+      context: .
+      target: tracker
+    ports:
+      - "8080:8080"
+    networks:
+      - torrent-network
+
+  seeder:
+    build:
+      context: .
+      target: client
+    command:
+      - "-torrent"
+      - "/testdata/bigfile.torrent"
+      - "-out"
+      - "/testdata/seed/ubuntu.iso" #add actual file name
+      - "-port"
+      - "6881"
+      - "-seed=true"
+    ports:
+      - "6881:6881"
+
+  leecher:
+    build:
+      context: .
+      target: client
+    command:
+      - "-torrent"
+      - "/testdata/bigfile.torrent"
+      - "-out"
+      - "/testdata/leech/ubuntu.iso"
+      - "-port"
+      - "6882"
+      - "-seed=false"
+    ports:
+      - "6882:6882"
+
+
+  downloadUbuntu:
+    build:
+      context: .
+      target: client
+    command:
+      - "-torrent"
+      - "/testdata/test.torrent"
+      - "-out"
+      - "/testdata/leech/ubuntu.iso"
+      - "-port"
+      - "6881"
+      - "-seed=false"
+    ports:
+      - "6881:6881"
+
+networks:
+  torrent-network:
+    driver: bridge
