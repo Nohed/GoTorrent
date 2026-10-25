@@ -70,7 +70,7 @@ func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 }
 
 func (m *Manager) runScheduler() {
-	rechokeTicker := time.NewTicker(10 * time.Second)
+	rechokeTicker := time.NewTicker(time.Second)
 	defer rechokeTicker.Stop()
 
 	timeoutTicker := time.NewTicker(2 * time.Second)
@@ -346,8 +346,9 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 		m.scheduler.pieceIO.Requests <- storage.DiskRequest{Kind: storage.DiskWrite,
 			SenderID:   p.Conn.PeerID,
 			PieceIndex: ev.PieceIndex,
-			Begin:      ev.Begin, Length: ev.Length,
-			Piece: piece}
+			Begin:      ev.Begin,
+			Length:     ev.Length,
+			Piece:      piece}
 	}
 
 	// Slot freed up, we can request next block from this peer
