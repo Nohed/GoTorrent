@@ -43,5 +43,3 @@ func NewPeer(conn *Connection, count int) *Peer {
 	p.AmInterested.Store(false)
 	return p
 }
-
-// Has reports whether the peer has the piece at the given index.

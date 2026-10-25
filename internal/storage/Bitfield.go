@@ -8,7 +8,6 @@ type Bitfield struct {
 	data      []byte
 }
 
-// NewBitfield creates an empty bitfield for the given number of pieces.
 func NewBitfield(numPieces int) *Bitfield {
 	return &Bitfield{
 		numPieces: numPieces,
@@ -16,7 +15,6 @@ func NewBitfield(numPieces int) *Bitfield {
 	}
 }
 
-// Has reports whether the piece at index is available.
 func (b *Bitfield) Has(index int) bool {
 	if !b.validIndex(index) {
 		return false
@@ -28,7 +26,6 @@ func (b *Bitfield) Has(index int) bool {
 	return b.data[byteIndex]&mask != 0
 }
 
-// SetPiece marks a piece as available.
 func (b *Bitfield) SetPiece(index int) error {
 	if !b.setBit(index, true) {
 		return fmt.Errorf("piece index %d out of range", index)
@@ -37,12 +34,10 @@ func (b *Bitfield) SetPiece(index int) error {
 	return nil
 }
 
-// ClearPiece marks a piece as unavailable.
 func (b *Bitfield) ClearPiece(index int) {
 	b.setBit(index, false)
 }
 
-// SetBitfield replaces the raw bitfield data.
 func (b *Bitfield) SetBitfield(data []byte) error {
 	if len(data) != len(b.data) {
 		return fmt.Errorf(
@@ -55,12 +50,10 @@ func (b *Bitfield) SetBitfield(data []byte) error {
 	return nil
 }
 
-// Bytes returns a copy of the raw bitfield.
 func (b *Bitfield) Bytes() []byte {
 	return append([]byte(nil), b.data...)
 }
 
-// NumPieces returns the number of pieces represented.
 func (b *Bitfield) NumPieces() int {
 	return b.numPieces
 }

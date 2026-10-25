@@ -13,8 +13,6 @@ const (
 	optimisticRotate = 3
 )
 
-// Types
-
 // PeerStats holds per-round traffic counters only. Choke/interest state
 // lives on peer.Peer, which is the single source of truth for it.
 type PeerStats struct {
@@ -34,14 +32,12 @@ type Choker struct {
 	seeding    bool
 }
 
-// Constructor
 func NewChoker() *Choker {
 	return &Choker{
 		peers: make(map[*peer.Peer]*PeerStats),
 	}
 }
 
-// Public peer management
 func (c *Choker) AddPeer(p *peer.Peer) {
 	if _, ok := c.peers[p]; !ok {
 		c.peers[p] = &PeerStats{}
@@ -71,7 +67,6 @@ func (c *Choker) IncrementDownload(p *peer.Peer, bytes int) {
 	}
 }
 
-// Main operation/purpose
 func (c *Choker) RecalculateChoking() *Decision {
 	c.round++
 
@@ -129,7 +124,6 @@ func (c *Choker) selectRegular(candidates []*peer.Peer) map[*peer.Peer]bool {
 	return selected
 }
 
-// 6. Optimistic unchoking
 func (c *Choker) updateOptimistic(candidates []*peer.Peer, selected map[*peer.Peer]bool) {
 	if c.round%optimisticRotate == 1 || !c.optimisticStillValid(selected) {
 		c.optimistic = c.pickOptimistic(candidates, selected)
@@ -177,7 +171,7 @@ func (c *Choker) pickOptimistic(candidates []*peer.Peer, selected map[*peer.Peer
 	return pool[rand.Intn(len(pool))]
 }
 
-// diffAgainstCurrent compares the desired unchoked set with each peer's
+// diffAgainstCurrent compares the desired unchoked set with each peers
 // actual AmChoking state, updates it, and returns only the changes.
 func (c *Choker) diffAgainstCurrent(selected map[*peer.Peer]bool) *Decision {
 	d := &Decision{}
