@@ -25,6 +25,8 @@ const (
 	yellow    = "\033[33m"
 	boldBlue  = "\033[1;34m"
 	magenta   = "\033[35m"
+	white     = "\033[37m"
+	boldWhite = "\033[1;37m"
 	boldGreen = "\033[1;32m"
 )
 const (
@@ -203,7 +205,7 @@ func renderStats(w io.Writer, stats engine.Stats, downSpeed, upSpeed float64) {
 
 	stateTag := boldGreen + "[Downloading]" + reset
 	if stats.Done || stats.Left == 0 {
-		stateTag = boldGreen + "[SEED]" + reset
+		stateTag = boldGreen + "[SEEDING]   " + reset // keep spaces in string to make it as long as "[Downloading]"
 	}
 
 	bar := progressBar(percent, 10)
@@ -211,10 +213,10 @@ func renderStats(w io.Writer, stats engine.Stats, downSpeed, upSpeed float64) {
 	// UPDate row:
 	// \r returns cursor to column 0,
 	// \033[K clears from cursor to end of line
-	fmt.Fprintf(w, "\r%s %s %s%5.1f%%%s | %s%s%s/%s | %sDL: %s%s | %sUL: %s%s | %sPeers: %d%s\033[K",
+	fmt.Fprintf(w, "\r%s %s %5.1f%%%s | %s%s%s/%s | %sDL: %s%s | %sUL: %s%s | %sPeers: %d%s\033[K",
 		stateTag,
 		bar,
-		boldGreen, percent, reset,
+		percent, reset,
 		boldBlue, formatBytes(float64(stats.TotalLength-stats.Left)), reset,
 		formatBytes(float64(stats.TotalLength)),
 		green, formatRate(downSpeed), reset,
@@ -223,7 +225,7 @@ func renderStats(w io.Writer, stats engine.Stats, downSpeed, upSpeed float64) {
 	)
 }
 
-// progressBar renders an ASCII progress bar like [=====>----] based on percentage and width.
+// renders an ASCII progress bar.
 func progressBar(percent float64, width int) string {
 	// Clamp percentage between 0 and 100
 	if percent < 0 {
@@ -236,24 +238,17 @@ func progressBar(percent float64, width int) string {
 
 	var sb strings.Builder
 	sb.WriteString("[")
-	sb.WriteString(green)
 
-	// Draw completed portion
+	// completed portion
 	for i := 0; i < completed; i++ {
-		sb.WriteByte('=')
+		sb.WriteByte('#')
 	}
 
-	// Draw current progress head and remaining empty slots
-	if completed < width {
-		sb.WriteString(boldGreen)
-		sb.WriteByte('>')
-		sb.WriteString(reset)
-		sb.WriteString(dim)
-		for i := completed + 1; i < width; i++ {
-			sb.WriteByte('-')
-		}
-		sb.WriteString(reset)
+	// remaining empty slots
+	for i := completed; i < width; i++ {
+		sb.WriteByte('.')
 	}
+
 	sb.WriteString("]")
 	return sb.String()
 }
@@ -280,29 +275,6 @@ func formatRate(bytesPerSec float64) string {
 	return formatBytes(bytesPerSec) + "/s"
 }
 
-// formatDuration converts a time.Duration into a readable string (e.g. 1m05.20s or 9.26s).
 func formatDuration(d time.Duration) string {
-	if d < 0 {
-		return "--"
-	}
-	if d == 0 {
-		return "0.00s"
-	}
-
-	// Round to two decimal places and extract time units
-	d = d.Round(10 * time.Millisecond)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d.Seconds()
-
-	// Format based on largest unit present
-	if h > 0 {
-		return fmt.Sprintf("%dh%02dm%05.2fs", h, m, s)
-	}
-	if m > 0 {
-		return fmt.Sprintf("%dm%05.2fs", m, s)
-	}
-	return fmt.Sprintf("%.2fs", s)
+	return d.Round(10 * time.Millisecond).String()
 }
