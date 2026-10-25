@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,14 +41,49 @@ func main() {
 		port        = flag.Uint("port", 6881, "listening port (0 = random)")
 		maxPeers    = flag.Int("peers", 50, "max peer connections")
 		seed        = flag.Bool("seed", true, "keep running and seed after download completes")
+		csvPath     = flag.String("csv", "", "path to record time-series transfer metrics (e.g. metrics.csv)")
 		debug       = flag.Bool("d", false, "enable debug logging")
 		verbose     = flag.Bool("v", false, "enable verbose logging")
 	)
 	flag.Parse()
 
 	if *torrentPath == "" {
-		fmt.Fprintf(os.Stderr, "%sUsage:%s gotorrent -torrent <file.torrent> [-out <output_path>] [-port <port>] [-peers <max_peers>] [-seed] [-v]\n", bold, reset)
+		fmt.Fprintf(os.Stderr, "%sUsage:%s gotorrent -torrent <file.torrent> [-out <output_path>] [-port <port>] [-peers <max_peers>] [-seed] [-csv <metrics.csv>] [-v]\n", bold, reset)
 		os.Exit(2)
+	}
+
+	var csvWriter *csv.Writer
+	if *csvPath != "" {
+		f, err := os.Create(*csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%sError creating CSV metrics file:%s %v\n", red, reset, err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		csvWriter = csv.NewWriter(f)
+		defer csvWriter.Flush()
+
+		// Write CSV header
+		header := []string{
+			"timestamp",
+			"elapsed_sec",
+			"down_speed_MBps",
+			"up_speed_MBps",
+			"down_speed_bps",
+			"up_speed_bps",
+			"downloaded_bytes",
+			"uploaded_bytes",
+			"have_pieces",
+			"total_pieces",
+			"peers",
+			"progress_pct",
+			"state",
+		}
+		if err := csvWriter.Write(header); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError writing CSV header:%s %v\n", red, reset, err)
+			os.Exit(1)
+		}
+		csvWriter.Flush()
 	}
 
 	// In non-verbose mode, write only warnings/errors to stderr so they don't corrupt the status line.
@@ -122,6 +159,10 @@ func main() {
 		select {
 		case <-sigChan:
 			fmt.Printf("\n\n%sShutting down gracefully (closing peer connections)...%s\n", yellow, reset)
+			if *csvPath != "" && csvWriter != nil {
+				csvWriter.Flush()
+				fmt.Printf("%sMetrics saved to %s%s\n", green, *csvPath, reset)
+			}
 			return
 
 		case <-m.Done():
@@ -144,6 +185,10 @@ func main() {
 
 				if !*seed {
 					fmt.Printf("%sSeeding disabled by flag. Exiting.%s\n", dim, reset)
+					if *csvPath != "" && csvWriter != nil {
+						csvWriter.Flush()
+						fmt.Printf("%sMetrics saved to %s%s\n", green, *csvPath, reset)
+					}
 					return
 				}
 				fmt.Printf("%sNow seeding to peers (press Ctrl+C to stop)...%s\n", green, reset)
@@ -175,6 +220,42 @@ func main() {
 				eta = time.Duration(etaSeconds) * time.Second
 			} else if stats.Left == 0 {
 				eta = 0
+			}
+
+			// Record CSV metrics
+			if csvWriter != nil {
+				var percent float64
+				if stats.TotalLength > 0 {
+					completedBytes := stats.TotalLength - stats.Left
+					if completedBytes < 0 {
+						completedBytes = 0
+					}
+					percent = (float64(completedBytes) / float64(stats.TotalLength)) * 100
+				} else if stats.TotalPieces > 0 {
+					percent = (float64(stats.HavePieces) / float64(stats.TotalPieces)) * 100
+				}
+
+				state := "downloading"
+				if stats.Done || stats.Left == 0 {
+					state = "seeding"
+				}
+
+				_ = csvWriter.Write([]string{
+					now.Format(time.RFC3339),
+					fmt.Sprintf("%.2f", now.Sub(startTime).Seconds()),
+					fmt.Sprintf("%.3f", downSpeed/(1024*1024)),
+					fmt.Sprintf("%.3f", upSpeed/(1024*1024)),
+					fmt.Sprintf("%.0f", downSpeed),
+					fmt.Sprintf("%.0f", upSpeed),
+					strconv.FormatUint(stats.Downloaded, 10),
+					strconv.FormatUint(stats.Uploaded, 10),
+					strconv.Itoa(stats.HavePieces),
+					strconv.Itoa(stats.TotalPieces),
+					strconv.Itoa(stats.ActivePeers),
+					fmt.Sprintf("%.2f", percent),
+					state,
+				})
+				csvWriter.Flush()
 			}
 
 			renderStats(os.Stdout, stats, downSpeed, upSpeed, eta, *verbose, logger)
@@ -316,7 +397,7 @@ func formatDuration(d time.Duration) string {
 	if d == 0 {
 		return "0.00s"
 	}
-	d = d.Round(10 * time.Millisecond) // avrunda till 2 decimaler
+	d = d.Round(10 * time.Millisecond) // Round t 2 decimaler
 	h := d / time.Hour
 	d -= h * time.Hour
 	m := d / time.Minute
