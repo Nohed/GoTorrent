@@ -9,6 +9,11 @@
 /client
 /tracker
 /backup
+/charts
+/data
+/csvdata
+
+cmd.txt
 
 *.exe
 *.exe~
