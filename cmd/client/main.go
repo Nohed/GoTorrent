@@ -27,11 +27,9 @@ const (
 	green     = "\033[32m"
 	yellow    = "\033[33m"
 	blue      = "\033[34m"
+	boldBlue  = "\033[1;34m"
 	magenta   = "\033[35m"
-	cyan      = "\033[36m"
-	boldWhite = "\033[1;37m"
 	boldGreen = "\033[1;32m"
-	boldCyan  = "\033[1;36m"
 )
 
 func main() {
@@ -129,13 +127,12 @@ func main() {
 	// Initial piece stats check
 	initStats := m.Stats()
 	if initStats.HavePieces > 0 {
-		fmt.Printf("%sExisting data verified:%s %s%d/%d%s pieces completed (%s%.1f%%%s)\n\n",
-			boldCyan, reset,
+		fmt.Printf("Existing data verified: %s%d/%d%s pieces completed (%s%.1f%%%s)\n\n",
 			green, initStats.HavePieces, initStats.TotalPieces, reset,
 			green, float64(initStats.HavePieces)/float64(initStats.TotalPieces)*100, reset,
 		)
 	} else {
-		fmt.Printf("%sConnecting to swarm...%s\n", cyan, reset)
+		fmt.Printf("Connecting to swarm...\n")
 	}
 
 	// Capture OS signals for graceful shutdown
@@ -264,16 +261,17 @@ func main() {
 }
 
 func printBanner(t *torrent.Torrent, outPath string, port uint16, maxPeers int) {
-	fmt.Println(cyan + "====================================================" + reset)
-	fmt.Printf("%s               GoTorrent Client                     %s\n", boldCyan, reset)
-	fmt.Println(cyan + "====================================================" + reset)
-	fmt.Printf("  %sName:%s        %s%s%s\n", bold, reset, boldWhite, t.Name, reset)
-	fmt.Printf("  %sSize:%s        %s (%d bytes)\n", bold, reset, formatBytes(float64(t.Length)), t.Length)
-	fmt.Printf("  %sPieces:%s      %d x %s\n", bold, reset, len(t.PieceHashes), formatBytes(float64(t.PieceLength)))
-	fmt.Printf("  %sOutput:%s      %s\n", bold, reset, outPath)
-	fmt.Printf("  %sTracker:%s     %s\n", bold, reset, t.Announce)
-	fmt.Printf("  %sListen Port:%s %d (Max peers: %d)\n", bold, reset, port, maxPeers)
-	fmt.Println(cyan + "====================================================" + reset)
+	fmt.Println("====================================================")
+	fmt.Printf("%s                  GoTorrent Client                  %s\n", bold, reset)
+	fmt.Println("====================================================")
+	fmt.Printf("  %sName:%s           %s\n", bold, reset, t.Name)
+	fmt.Printf("  %sTracker:%s        %s\n\n", bold, reset, t.Announce)
+	fmt.Printf("  %sSize:%s           %s\n", bold, reset, formatBytes(float64(t.Length)))
+	fmt.Printf("  %sPieces:%s         %d x %s\n", bold, reset, len(t.PieceHashes), formatBytes(float64(t.PieceLength)))
+	fmt.Printf("  %sOutput:%s         %s\n", bold, reset, outPath)
+	fmt.Printf("  %sListening Port:%s %d\n", bold, reset, port)
+	fmt.Printf("  %sMax Peers:%s      %d\n", bold, reset, maxPeers)
+	fmt.Println("====================================================")
 }
 
 func renderStats(w io.Writer, stats engine.Stats, downSpeed, upSpeed float64, eta time.Duration, verbose bool, logger *slog.Logger) {
@@ -288,12 +286,11 @@ func renderStats(w io.Writer, stats engine.Stats, downSpeed, upSpeed float64, et
 		percent = (float64(stats.HavePieces) / float64(stats.TotalPieces)) * 100
 	}
 
-	stateTag := boldCyan + "[DOWNLOADING]" + reset
+	stateTag := boldGreen + "[DL]" + reset
 	if stats.Done || stats.Left == 0 {
-		stateTag = boldGreen + "[SEEDING]    " + reset
+		stateTag = boldGreen + "[SEED]" + reset
 	}
 
-	// In verbose mode, log structured progress rather than overwriting the terminal line
 	if verbose {
 		stateName := "Downloading"
 		if stats.Done || stats.Left == 0 {
@@ -312,25 +309,19 @@ func renderStats(w io.Writer, stats engine.Stats, downSpeed, upSpeed float64, et
 		return
 	}
 
-	bar := progressBar(percent, 20)
-	etaStr := formatDuration(eta)
-	if stats.Done || stats.Left == 0 {
-		etaStr = "Complete"
-	}
+	bar := progressBar(percent, 10)
 
 	// Single-line in-place terminal update:
 	// \r returns cursor to column 0, \033[K clears from cursor to end of line
-	fmt.Fprintf(w, "\r%s %s %s%5.1f%%%s %s(%d/%d)%s | %s / %s | %sDL:%s %s | %sUL:%s %s | %sPeers:%s %2d | %sETA:%s %s\033[K",
+	fmt.Fprintf(w, "\r%s %s %s%5.1f%%%s | %s%s%s/%s | %sDL: %s%s | %sUL: %s%s | %sPeers: %d%s\033[K",
 		stateTag,
 		bar,
-		boldWhite, percent, reset,
-		dim, stats.HavePieces, stats.TotalPieces, reset,
-		formatBytes(float64(stats.TotalLength-stats.Left)),
+		boldGreen, percent, reset,
+		boldBlue, formatBytes(float64(stats.TotalLength-stats.Left)), reset,
 		formatBytes(float64(stats.TotalLength)),
-		green, reset, formatRate(downSpeed),
-		cyan, reset, formatRate(upSpeed),
-		yellow, reset, stats.ActivePeers,
-		magenta, reset, etaStr,
+		green, formatRate(downSpeed), reset,
+		magenta, formatRate(upSpeed), reset,
+		yellow, stats.ActivePeers, reset,
 	)
 }
 
