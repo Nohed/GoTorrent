@@ -1,7 +1,7 @@
 import os
 import shutil
 
-src = "testdata/seed/debian.iso"
+src = "testdata/seed/ubuntu.iso"
 piece = 262144              
 chunk = 64 * 1024 * 1024 
 

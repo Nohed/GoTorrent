@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# --- edit these ---
 OPERATE_DIR="${1:-testdata/client1F}"
-     # folder name, or pass it as the first argument
 FILENAME="debian.iso"           
 PORT=6882                     
 
@@ -23,5 +21,3 @@ exec ./client \
   -port "$PORT" \
   -peers 50 \
   -seed=true
-# Replace with your real command, e.g.:
-# go run ../cmd/gotorrent -torrent ../debian.torrent -out "$FILENAME" -port "$PORT"
