@@ -43,15 +43,6 @@ type scheduler struct {
 	haveCount    int // Insta check the number of peices
 }
 
-// It should probably be a atmoic and accesed safely
-
-// TODO: DEADLOCK POSSIBLITY:
-// When a peer requests a block or a piece finishes, scheduler attempts to write to pieceIO.Requests:
-// When PieceIO finishes reading or writing disk blocks and attempts to send the result back to m.events
-// IF disk IO is too slow, Both channels might fill upp.
-// * Scheduler blocks and hangs on writes to pieceIO.Requests:
-// * PeiceIO blocks and hangs on writes to m.events
-// = Both routines freeze forever.
 func newScheduler(t *torrent.Torrent, pio *storage.PieceIO) *scheduler {
 	n := len(t.PieceHashes)
 	return &scheduler{
@@ -342,7 +333,6 @@ func (m *Manager) onBlockReceived(ev types.Event) {
 	m.downloaded.Add(uint64(len(ev.Data)))
 
 	if piece.Complete() {
-		//dont take away inProgress yet! Wait until we get confirmation from IO that it actually went to disk and remove it on confirmation
 		m.scheduler.pieceIO.Requests <- storage.DiskRequest{Kind: storage.DiskWrite,
 			SenderID:   p.Conn.PeerID,
 			PieceIndex: ev.PieceIndex,
@@ -372,8 +362,8 @@ func (m *Manager) onBlockRequested(ev types.Event) {
 		w.Stop() //Should we stop just becasue of this
 		return
 	}
-
-	if p.AmChoking.Load() || !p.PeerInterested.Load() || !m.scheduler.have[ev.PieceIndex] { //dont send, we may have choked while message is in transit or something esle
+	//dont send, we may have choked while message is in transit or something esle
+	if p.AmChoking.Load() || !p.PeerInterested.Load() || !m.scheduler.have[ev.PieceIndex] {
 		return
 	}
 
@@ -439,7 +429,7 @@ func (m *Manager) onDiskWrite(ev types.Event) {
 		m.requestBlocksFromAll()
 		return
 	}
-	// ---- Writing succeded
+	//  Writing succeded
 
 	if !m.scheduler.have[ev.PieceIndex] {
 		m.scheduler.have[ev.PieceIndex] = true

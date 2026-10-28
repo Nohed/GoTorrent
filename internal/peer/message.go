@@ -121,8 +121,6 @@ func (m *Message) ParsePiece() (index, begin int, data []byte, err error) {
 	return index, begin, m.Payload[8:], nil
 }
 
-// ---- Read messages & Handshake -------
-
 /*
 4 bytes           1 byte     n bytes
 [length prefix][message ID][payload... .. .]

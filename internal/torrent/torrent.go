@@ -87,16 +87,14 @@ func Parse(data []byte) (*Torrent, error) {
 
 // Turn "pieces" string into 20-byte hash
 func splitPieceHashes(pieces string) ([][20]byte, error) {
-	bytes := []byte(pieces)                            // Convert string into byte slice
+	bytes := []byte(pieces)
 	if len(bytes) == 0 || len(bytes)%hashLength != 0 { // Check if length is a multiple of 20
 		return nil, fmt.Errorf("malformed pieces string: length %d", len(bytes))
 	}
 
-	hashes := make([][20]byte, len(bytes)/hashLength) // Slice of 20-byte arrays
+	hashes := make([][20]byte, len(bytes)/hashLength) // Slice of 20 byte arrays
 	for i := range hashes {
 		copy(hashes[i][:], bytes[i*hashLength:(i+1)*hashLength]) // Copy 20 byte slice
 	}
 	return hashes, nil
 }
-
-// ============== Helpers ==============

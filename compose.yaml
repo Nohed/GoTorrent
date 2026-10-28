@@ -34,7 +34,7 @@ services:
       - "/testdata/leech/ubuntu.iso"
       - "-port"
       - "6882"
-      - "-seed=false"
+      - "-seed=false"
     ports:
       - "6882:6882"
 

@@ -193,17 +193,17 @@ func (m *Manager) Wait() {
 
 // Stats represents a snapshot of the manager's live transfer and swarm statistics.
 type Stats struct {
-	Downloaded  uint64 // Payload bytes downloaded from peers
-	Uploaded    uint64 // Payload bytes uploaded to peers
-	TotalLength int64  // Total length of the torrent file in bytes
-	Left        int64  // Remaining bytes to download
-	HavePieces  int    // Number of verified completed pieces
-	TotalPieces int    // Total number of pieces in the torrent
-	ActivePeers int    // Currently connected peers
-	Done        bool   // Whether all pieces have been downloaded and verified
+	Downloaded  uint64
+	Uploaded    uint64
+	TotalLength int64
+	Left        int64
+	HavePieces  int
+	TotalPieces int
+	ActivePeers int
+	Done        bool
 }
 
-// Stats returns a thread-safe snapshot of download progress, speeds, and connected peers.
+// returns a snapshot of download progress, speed and connected peers.
 func (m *Manager) Stats() Stats {
 	m.mu.Lock()
 	peers := len(m.connections)
@@ -238,7 +238,6 @@ func (m *Manager) Stats() Stats {
 	}
 }
 
-// Torrent returns the parsed metadata of the torrent.
 func (m *Manager) Torrent() *torrent.Torrent {
 	return m.torrent
 }
